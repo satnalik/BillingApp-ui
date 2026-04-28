@@ -1,13 +1,24 @@
 import React from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 
+function getUserRole() {
+  try {
+    const token = localStorage.getItem("token");
+    if (!token) return null;
+    const payload = JSON.parse(atob(token.split(".")[1]));
+    return payload.role || payload.roles || null;
+  } catch {
+    return null;
+  }
+}
+
 const navItems = [
   { label: "New Bill", path: "/new-bill" },
   { label: "Get Bill", path: "/get-bill" },
-  { label: "Reports", path: "/reports" },
-  { label: "Products", path: "/add-products" },
-  { label: "Check Inventory", path: "/check-inventory" },
-  { label: "Salesman", path: "/add-salesman" },
+  { label: "Reports", path: "/reports", adminOnly: true },
+  { label: "Products", path: "/add-products", adminOnly: true },
+  { label: "Check Inventory", path: "/check-inventory", adminOnly: true },
+  { label: "Salesman", path: "/add-salesman", adminOnly: true },
 ];
 
 export default function BillingLayout() {
@@ -50,21 +61,33 @@ export default function BillingLayout() {
           <div className="flex items-center gap-3">
             <nav className="overflow-x-auto">
               <div className="flex min-w-max gap-2">
-                {navItems.map((item) => (
-                  <NavLink
-                    key={item.path}
-                    to={item.path}
-                    className={({ isActive }) =>
-                      `block rounded-lg px-4 py-3 text-sm font-semibold transition-colors ${
-                        isActive
-                          ? "bg-blue-600 text-white shadow-sm"
-                          : "text-slate-700 hover:bg-slate-100"
-                      }`
+                {navItems
+                  .filter((item) => {
+                    if (!item.adminOnly) return true;
+                    const role = getUserRole();
+                    if (!role) return false;
+                    if (Array.isArray(role)) {
+                      return (
+                        role.includes("Admin") || role.includes("ROLE_ADMIN")
+                      );
                     }
-                  >
-                    {item.label}
-                  </NavLink>
-                ))}
+                    return role === "Admin" || role === "ROLE_ADMIN";
+                  })
+                  .map((item) => (
+                    <NavLink
+                      key={item.path}
+                      to={item.path}
+                      className={({ isActive }) =>
+                        `block rounded-lg px-4 py-3 text-sm font-semibold transition-colors ${
+                          isActive
+                            ? "bg-blue-600 text-white shadow-sm"
+                            : "text-slate-700 hover:bg-slate-100"
+                        }`
+                      }
+                    >
+                      {item.label}
+                    </NavLink>
+                  ))}
               </div>
             </nav>
           </div>

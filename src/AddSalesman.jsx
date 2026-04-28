@@ -78,11 +78,7 @@ export default function AddSalesman() {
   const handleSubmit = async (e) => {
     e.preventDefault();
 
-    if (
-      !form.name.trim() ||
-      !form.phoneNumber.trim() ||
-      isSaving
-    ) {
+    if (!form.name.trim() || !form.phoneNumber.trim() || isSaving) {
       return;
     }
 
@@ -94,7 +90,7 @@ export default function AddSalesman() {
         phoneNumber: form.phoneNumber.trim(),
       };
 
-      await api.post("/salesman", payload);
+      await api.post("/salesman/addsalesman", payload);
       await loadSalesmen();
       setSuccessMessage("Salesman added successfully.");
       setIsModalOpen(false);
@@ -137,12 +133,16 @@ export default function AddSalesman() {
 
       setSalesmen((prev) =>
         prev.map((item) =>
-          item.employeeId === employeeId ? { ...item, active: nextActive } : item,
+          item.employeeId === employeeId
+            ? { ...item, active: nextActive }
+            : item,
         ),
       );
     } catch (error) {
       console.error("Failed to update salesman status:", error);
-      alert(error.response?.data?.message || "Failed to update salesman status");
+      alert(
+        error.response?.data?.message || "Failed to update salesman status",
+      );
     } finally {
       setTogglingId("");
     }
@@ -327,9 +327,7 @@ export default function AddSalesman() {
                 <button
                   type="submit"
                   disabled={
-                    isSaving ||
-                    !form.name.trim() ||
-                    !form.phoneNumber.trim()
+                    isSaving || !form.name.trim() || !form.phoneNumber.trim()
                   }
                   className="rounded-xl bg-blue-600 px-5 py-3 text-sm font-bold text-white hover:bg-blue-700 disabled:bg-slate-200"
                 >

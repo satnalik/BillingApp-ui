@@ -31,6 +31,7 @@ api.interceptors.response.use(
     if (error.response && (error.response.status === 401)) {
       console.warn("Token expired or invalid. Redirecting to login...");
       
+      
       // 1. Clear the local storage so we don't keep sending the bad token
       localStorage.removeItem('token');
       localStorage.removeItem('user');
