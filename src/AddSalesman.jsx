@@ -16,12 +16,24 @@ export default function AddSalesman() {
   const [successMessage, setSuccessMessage] = useState("");
   const [togglingId, setTogglingId] = useState("");
 
+  const normalizeSalesman = (salesman) => {
+    if (!salesman || typeof salesman !== "object") return salesman;
+
+    if (salesman.active !== undefined) return salesman;
+    if (salesman.isActive !== undefined) {
+      return { ...salesman, active: Boolean(salesman.isActive) };
+    }
+
+    return salesman;
+  };
+
   const loadSalesmen = async () => {
     setIsLoading(true);
 
     try {
       const response = await api.get("/salesman");
-      setSalesmen(Array.isArray(response.data) ? response.data : []);
+      const data = Array.isArray(response.data) ? response.data : [];
+      setSalesmen(data.map(normalizeSalesman));
     } catch (error) {
       console.error("Failed to load salesmen:", error);
       setSalesmen([]);
@@ -105,39 +117,37 @@ export default function AddSalesman() {
 
   const handleToggleActive = async (salesman) => {
     const employeeId = salesman.employeeId;
-    const nextActive = !salesman.active;
+    const currentActive =
+      salesman.active === undefined || salesman.active === null
+        ? true
+        : Boolean(salesman.active);
+    const nextActive = !currentActive;
 
     if (!employeeId || togglingId) return;
 
     setTogglingId(String(employeeId));
 
     try {
-      const fullPayload = {
-        employeeId: salesman.employeeId,
-        name: salesman.name,
-        phoneNumber: salesman.phoneNumber,
+      const response = await api.patch(`/salesman/${employeeId}/active`, {
         active: nextActive,
-      };
+      });
 
-      try {
-        await api.patch(`/salesman/${employeeId}`, { active: nextActive });
-      } catch (patchError) {
-        try {
-          await api.put(`/salesman/${employeeId}`, fullPayload);
-        } catch (putError) {
-          await api.patch(`/salesman/${employeeId}/active`, {
-            active: nextActive,
-          });
-        }
+      const updated = response?.data;
+      if (updated && updated.employeeId === employeeId) {
+        setSalesmen((prev) =>
+          prev.map((item) =>
+            item.employeeId === employeeId ? normalizeSalesman(updated) : item,
+          ),
+        );
+      } else {
+        setSalesmen((prev) =>
+          prev.map((item) =>
+            item.employeeId === employeeId
+              ? { ...item, active: nextActive }
+              : item,
+          ),
+        );
       }
-
-      setSalesmen((prev) =>
-        prev.map((item) =>
-          item.employeeId === employeeId
-            ? { ...item, active: nextActive }
-            : item,
-        ),
-      );
     } catch (error) {
       console.error("Failed to update salesman status:", error);
       alert(
@@ -329,7 +339,7 @@ export default function AddSalesman() {
                   disabled={
                     isSaving || !form.name.trim() || !form.phoneNumber.trim()
                   }
-                  className="rounded-xl bg-blue-600 px-5 py-3 text-sm font-bold text-white hover:bg-blue-700 disabled:bg-slate-200"
+                  className="rounded-xl bg-blue-600 px-5 py-3 text-sm font-bold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500 disabled:hover:bg-slate-200"
                 >
                   {isSaving ? "SAVING..." : "OK"}
                 </button>

@@ -60,6 +60,7 @@ export default function Login() {
 
       if (token) {
         localStorage.setItem("token", token);
+        localStorage.setItem("userId", form.userId);
 
         // Extract tenantId from JWT (assume JWT is in format header.payload.signature)
         try {
@@ -78,7 +79,7 @@ export default function Login() {
         }
 
         // Success - Move to dashboard
-        navigate("/new-bill");
+        navigate("/bill/new");
       } else {
         setErrorMsg("Authentication successful, but session token is missing.");
       }

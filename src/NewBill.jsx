@@ -1,8 +1,10 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import api from "./api";
+import BillSlots from "./components/newbill/BillSlots";
+import PaymentModal from "./components/newbill/PaymentModal";
 
 const HOLD_LIMIT = 5;
-const PAYMENT_METHODS = ["Cash", "Card", "UPI"];
+const PAYMENT_METHODS = ["Cash", "Card", "UPI", "Credit"];
 
 function createEmptyBillSlot(slotNumber) {
   return {
@@ -29,10 +31,37 @@ function formatCurrency(value) {
   return `Rs ${Number(value || 0).toFixed(2)}`;
 }
 
-function getDiscountedPrice(item) {
+function getDiscountedUnitPrice(item) {
   const price = Number(item.price) || 0;
-  const discountPercent = Number(item.discount) || 0;
-  return price - (price * discountPercent) / 100;
+  const discountValue = Number(item.discount) || 0;
+  const discountType = item.discountType || "PERCENT"; // PERCENT | AMOUNT
+
+  if (discountType === "AMOUNT") {
+    return Math.max(0, price - Math.min(price, discountValue));
+  }
+
+  const discountPercent = Math.min(100, Math.max(0, discountValue));
+  return Math.max(0, price - (price * discountPercent) / 100);
+}
+
+function toDiscountPercent(item) {
+  const price = Number(item.price) || 0;
+  const discountValue = Number(item.discount) || 0;
+  const discountType = item.discountType || "PERCENT"; // PERCENT | AMOUNT
+  if (discountType === "AMOUNT") {
+    if (price <= 0) return 0;
+    return Math.max(0, Math.min(100, (discountValue / price) * 100));
+  }
+  return Math.max(0, Math.min(100, discountValue));
+}
+
+function toPaymentMethodEnum(value) {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (normalized === "CASH") return "CASH";
+  if (normalized === "CARD") return "CARD";
+  if (normalized === "UPI") return "UPI";
+  if (normalized === "CREDIT") return "CREDIT";
+  return "CASH";
 }
 
 function getSlotDisplayName(slot) {
@@ -44,6 +73,7 @@ function getSlotDisplayName(slot) {
 
 export default function NewBill() {
   const [salesmen, setSalesmen] = useState([]);
+  const [products, setProducts] = useState([]);
   const [billSlots, setBillSlots] = useState(() =>
     Array.from({ length: HOLD_LIMIT }, (_, index) =>
       createEmptyBillSlot(index + 1),
@@ -58,9 +88,41 @@ export default function NewBill() {
   const [paymentRows, setPaymentRows] = useState([]);
   const [paymentError, setPaymentError] = useState("");
   const [completedBill, setCompletedBill] = useState(null);
+  const [billDiscountType, setBillDiscountType] = useState("PERCENT"); // PERCENT | AMOUNT
+  const [billDiscountValue, setBillDiscountValue] = useState("");
+  const [isProductSearchFocused, setIsProductSearchFocused] = useState(false);
+  const productSearchRef = useRef(null);
 
   const activeBill =
     billSlots.find((slot) => slot.id === activeSlotId) || billSlots[0];
+
+  const totals = useMemo(() => {
+    let baseTaxable = 0;
+
+    activeBill.cart.forEach((item) => {
+      const qty = Number(item.qty) || 0;
+      const itemTaxable = getDiscountedUnitPrice(item) * qty;
+      baseTaxable += itemTaxable;
+    });
+
+    const discountNumeric =
+      billDiscountValue === "" ? 0 : Number(billDiscountValue) || 0;
+
+    const billDiscountAmount =
+      billDiscountType === "AMOUNT"
+        ? Math.max(0, Math.min(baseTaxable, discountNumeric))
+        : Math.max(
+            0,
+            Math.min(baseTaxable, (baseTaxable * discountNumeric) / 100),
+          );
+
+    const taxable = Math.max(0, baseTaxable - billDiscountAmount);
+    const cgst = taxable * 0.09;
+    const sgst = taxable * 0.09;
+    const grandTotal = taxable + cgst + sgst;
+
+    return { baseTaxable, billDiscountAmount, taxable, cgst, sgst, grandTotal };
+  }, [activeBill.cart, billDiscountType, billDiscountValue]);
 
   useEffect(() => {
     const fetchSalesmen = async () => {
@@ -77,26 +139,73 @@ export default function NewBill() {
   }, []);
 
   useEffect(() => {
+    const loadProducts = async () => {
+      try {
+        let response;
+        try {
+          response = await api.get("/products");
+        } catch {
+          response = await api.get("/products/all");
+        }
+        setProducts(Array.isArray(response.data) ? response.data : []);
+      } catch (err) {
+        console.error("Products load failed:", err);
+        setProducts([]);
+      }
+    };
+
+    loadProducts();
+  }, []);
+
+  useEffect(() => {
+    if (!isProductSearchFocused) {
+      setSearchResults([]);
+      return undefined;
+    }
+
     if (!activeBill?.searchQuery) return undefined;
 
     const delayDebounceFn = setTimeout(async () => {
-      if (activeBill.searchQuery.length > 2) {
-        try {
-          const response = await api.get(
-            `/products/search?name=${activeBill.searchQuery}`,
+      const query = activeBill.searchQuery.trim().toLowerCase();
+      if (query.length < 2) return setSearchResults([]);
+
+      const matches = products
+        .filter((p) => {
+          const name = (p.name || "").toLowerCase();
+          const category = (p.category || "").toLowerCase();
+          const barcode = (p.barcode || "").toLowerCase();
+          return (
+            name.includes(query) ||
+            category.includes(query) ||
+            barcode.includes(query)
           );
-          setSearchResults(Array.isArray(response.data) ? response.data : []);
-        } catch (err) {
-          console.error("Search failed:", err);
-          setSearchResults([]);
-        }
-      } else {
-        setSearchResults([]);
-      }
+        })
+        .slice(0, 50);
+
+      setSearchResults(matches);
     }, 300);
 
     return () => clearTimeout(delayDebounceFn);
-  }, [activeBill?.searchQuery]);
+  }, [activeBill?.searchQuery, isProductSearchFocused, products]);
+
+  useEffect(() => {
+    if (!isProductSearchFocused) return undefined;
+
+    const handlePointerDown = (event) => {
+      if (!productSearchRef.current) return;
+      if (productSearchRef.current.contains(event.target)) return;
+      setIsProductSearchFocused(false);
+      setSearchResults([]);
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("touchstart", handlePointerDown);
+
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("touchstart", handlePointerDown);
+    };
+  }, [isProductSearchFocused]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -111,6 +220,16 @@ export default function NewBill() {
     const timer = setTimeout(() => setToast(""), 5000);
     return () => clearTimeout(timer);
   }, [toast]);
+
+  useEffect(() => {
+    if (!isPaymentModalOpen) return;
+    if (paymentRows.length !== 1) return;
+    setPaymentRows((prev) => {
+      if (prev.length !== 1) return prev;
+      const [row] = prev;
+      return [{ ...row, amount: totals.grandTotal.toFixed(2) }];
+    });
+  }, [isPaymentModalOpen, paymentRows.length, totals.grandTotal]);
 
   const updateActiveBill = (updates) => {
     setBillSlots((prev) =>
@@ -151,7 +270,10 @@ export default function NewBill() {
         item.id === product.id ? { ...item, qty: nextQty } : item,
       );
     } else {
-      nextCart = [...activeBill.cart, { ...product, qty: 1, discount: 0 }];
+      nextCart = [
+        ...activeBill.cart,
+        { ...product, qty: 1, discount: 0, discountType: "PERCENT" },
+      ];
     }
 
     updateActiveBill({
@@ -159,6 +281,7 @@ export default function NewBill() {
       searchQuery: "",
     });
     setSearchResults([]);
+    setIsProductSearchFocused(false);
   };
 
   const updateQty = (id, delta) => {
@@ -180,13 +303,30 @@ export default function NewBill() {
   };
 
   const updateDiscount = (id, value) => {
-    const numValue =
-      value === "" ? 0 : Math.min(100, Math.max(0, parseFloat(value) || 0));
-
     updateActiveBill({
-      cart: activeBill.cart.map((item) =>
-        item.id === id ? { ...item, discount: numValue } : item,
-      ),
+      cart: activeBill.cart.map((item) => {
+        if (item.id !== id) return item;
+
+        if ((item.discountType || "PERCENT") === "AMOUNT") {
+          const amt = value === "" ? 0 : Math.max(0, parseFloat(value) || 0);
+          return { ...item, discount: amt };
+        }
+
+        const numValue =
+          value === "" ? 0 : Math.min(100, Math.max(0, parseFloat(value) || 0));
+        return { ...item, discount: numValue };
+      }),
+    });
+  };
+
+  const toggleDiscountType = (id) => {
+    updateActiveBill({
+      cart: activeBill.cart.map((item) => {
+        if (item.id !== id) return item;
+        const current = item.discountType || "PERCENT";
+        const next = current === "PERCENT" ? "AMOUNT" : "PERCENT";
+        return { ...item, discountType: next, discount: 0 };
+      }),
     });
   };
 
@@ -204,7 +344,9 @@ export default function NewBill() {
   };
 
   const filteredSalesmen = salesmen.filter((salesman) =>
-    salesman.name?.toLowerCase().includes(activeBill.salesmanQuery.toLowerCase()),
+    salesman.name
+      ?.toLowerCase()
+      .includes(activeBill.salesmanQuery.toLowerCase()),
   );
 
   const handleSalesmanSelect = (salesman) => {
@@ -213,23 +355,6 @@ export default function NewBill() {
       salesmanQuery: salesman.name || "",
     });
   };
-
-  const totals = useMemo(() => {
-    let taxable = 0;
-    let cgst = 0;
-    let sgst = 0;
-
-    activeBill.cart.forEach((item) => {
-      const qty = Number(item.qty) || 0;
-      const itemTaxable = getDiscountedPrice(item) * qty;
-      taxable += itemTaxable;
-      cgst += itemTaxable * 0.09;
-      sgst += itemTaxable * 0.09;
-    });
-
-    const grandTotal = taxable + cgst + sgst;
-    return { taxable, cgst, sgst, grandTotal };
-  }, [activeBill.cart]);
 
   const paymentTotal = paymentRows.reduce(
     (sum, row) => sum + (parseFloat(row.amount) || 0),
@@ -252,11 +377,17 @@ export default function NewBill() {
   });
 
   const openPaymentModal = () => {
-    if (!activeBill.selectedSalesman || activeBill.cart.length === 0 || isSubmitting) {
+    if (
+      !activeBill.selectedSalesman ||
+      activeBill.cart.length === 0 ||
+      isSubmitting
+    ) {
       return;
     }
 
     setPaymentRows([createPaymentRow(totals.grandTotal.toFixed(2))]);
+    setBillDiscountType("PERCENT");
+    setBillDiscountValue("");
     setPaymentError("");
     setIsPaymentModalOpen(true);
   };
@@ -268,9 +399,33 @@ export default function NewBill() {
   };
 
   const updatePaymentRow = (id, updates) => {
-    setPaymentRows((prev) =>
-      prev.map((row) => (row.id === id ? { ...row, ...updates } : row)),
-    );
+    setPaymentRows((prev) => {
+      const nextRows = prev.map((row) =>
+        row.id === id ? { ...row, ...updates } : row,
+      );
+
+      if (!Object.prototype.hasOwnProperty.call(updates, "amount")) {
+        return nextRows;
+      }
+
+      if (nextRows.length < 2) return nextRows;
+
+      const adjustableIndex = nextRows.findIndex((row) => row.id !== id);
+      if (adjustableIndex === -1) return nextRows;
+
+      const totalToCollect = totals.grandTotal;
+      const sumExcludingAdjustable = nextRows.reduce((sum, row, index) => {
+        if (index === adjustableIndex) return sum;
+        return sum + (parseFloat(row.amount) || 0);
+      }, 0);
+
+      const remaining = Math.max(0, totalToCollect - sumExcludingAdjustable);
+      const remainingString = remaining ? remaining.toFixed(2) : "0.00";
+
+      return nextRows.map((row, index) =>
+        index === adjustableIndex ? { ...row, amount: remainingString } : row,
+      );
+    });
   };
 
   const addPaymentRow = () => {
@@ -355,15 +510,20 @@ export default function NewBill() {
 
     try {
       const billData = {
-        salesMan: { employeeId: activeBill.selectedSalesman },
+        salesmanEmployeeId: activeBill.selectedSalesman,
         items: activeBill.cart.map((item) => ({
           productName: item.name,
           quantity: item.qty,
-          discount: item.discount,
-          priceAtSale: Number(item.price) || 0,
+          discount: toDiscountPercent(item),
+          unitSellingPrice: Number(item.price) || 0,
         })),
         customerName: activeBill.customerName.trim() || "Guest",
         contactInfo: activeBill.contactNumber.trim() || "N/A",
+        payments: normalizedPayments.map((row) => ({
+          method: toPaymentMethodEnum(row.method),
+          amount: Number(row.amount) || 0,
+          reference: null,
+        })),
       };
 
       const response = await api.post("/bills", billData);
@@ -373,7 +533,10 @@ export default function NewBill() {
         response.data?.bill?.id ??
         null;
 
-      if ((response.status === 200 || response.status === 201) && createdBillId) {
+      if (
+        (response.status === 200 || response.status === 201) &&
+        createdBillId
+      ) {
         setCompletedBill({
           id: createdBillId,
           customerName: activeBill.customerName.trim() || "Guest",
@@ -406,7 +569,7 @@ export default function NewBill() {
   };
 
   return (
-    <div className="min-h-screen w-full bg-slate-50 p-6 font-sans">
+    <div className="w-full p-6 font-sans">
       {toast && (
         <div className="fixed left-1/2 top-6 z-50 -translate-x-1/2 rounded-lg bg-red-500 px-6 py-3 font-bold text-white shadow-lg">
           {toast}
@@ -414,159 +577,26 @@ export default function NewBill() {
       )}
 
       {isPaymentModalOpen && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/50 p-4">
-          <div className="w-full max-w-3xl rounded-2xl bg-white p-6 shadow-2xl">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <h2 className="text-2xl font-black text-slate-900">
-                  Complete Payment
-                </h2>
-                <p className="mt-2 text-sm text-slate-500">
-                  Collect payment before saving the bill.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={closePaymentModal}
-                className="rounded-lg px-3 py-2 text-sm font-semibold text-slate-500 hover:bg-slate-100"
-              >
-                Close
-              </button>
-            </div>
-
-            <div className="mt-6 grid gap-4 rounded-2xl border border-slate-200 bg-slate-50 p-5 md:grid-cols-3">
-              <div>
-                <div className="text-xs font-bold uppercase tracking-wide text-slate-500">
-                  Customer
-                </div>
-                <div className="mt-2 text-lg font-bold text-slate-900">
-                  {activeBill.customerName.trim() || "Guest"}
-                </div>
-              </div>
-              <div>
-                <div className="text-xs font-bold uppercase tracking-wide text-slate-500">
-                  Total To Collect
-                </div>
-                <div className="mt-2 text-lg font-bold text-slate-900">
-                  {formatCurrency(totals.grandTotal)}
-                </div>
-              </div>
-              <div>
-                <div className="text-xs font-bold uppercase tracking-wide text-slate-500">
-                  Remaining
-                </div>
-                <div
-                  className={`mt-2 text-lg font-bold ${
-                    Math.abs(paymentDifference) <= 0.05
-                      ? "text-emerald-600"
-                      : "text-amber-600"
-                  }`}
-                >
-                  {formatCurrency(paymentDifference)}
-                </div>
-              </div>
-            </div>
-
-            <div className="mt-6 space-y-3">
-              {paymentRows.map((row, index) => (
-                <div
-                  key={row.id}
-                  className="grid gap-3 rounded-2xl border border-slate-200 p-4 md:grid-cols-[1fr_1fr_auto]"
-                >
-                  <div>
-                    <label className="mb-2 block text-sm font-bold text-slate-600">
-                      Method {index + 1}
-                    </label>
-                    <select
-                      value={row.method}
-                      onChange={(e) =>
-                        updatePaymentRow(row.id, { method: e.target.value })
-                      }
-                      className="w-full rounded-xl border-2 border-slate-200 p-3 outline-none focus:border-blue-500"
-                    >
-                      {PAYMENT_METHODS.map((method) => (
-                        <option key={method} value={method}>
-                          {method}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="mb-2 block text-sm font-bold text-slate-600">
-                      Amount
-                    </label>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={row.amount}
-                      onChange={(e) =>
-                        updatePaymentRow(row.id, { amount: e.target.value })
-                      }
-                      className="w-full rounded-xl border-2 border-slate-200 p-3 outline-none focus:border-blue-500"
-                    />
-                  </div>
-
-                  <div className="flex items-end">
-                    <button
-                      type="button"
-                      onClick={() => removePaymentRow(row.id)}
-                      disabled={paymentRows.length === 1}
-                      className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40"
-                    >
-                      Remove
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-              <button
-                type="button"
-                onClick={addPaymentRow}
-                disabled={paymentRows.length >= PAYMENT_METHODS.length}
-                className="rounded-xl border border-slate-300 px-5 py-3 text-sm font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40"
-              >
-                Add Split Payment
-              </button>
-
-              <div className="text-right">
-                <div className="text-xs font-bold uppercase tracking-wide text-slate-500">
-                  Collected
-                </div>
-                <div className="text-xl font-black text-slate-900">
-                  {formatCurrency(paymentTotal)}
-                </div>
-              </div>
-            </div>
-
-            {paymentError && (
-              <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-semibold text-rose-700">
-                {paymentError}
-              </div>
-            )}
-
-            <div className="mt-6 flex flex-wrap justify-end gap-3">
-              <button
-                type="button"
-                onClick={closePaymentModal}
-                className="rounded-xl border border-slate-300 px-5 py-3 text-sm font-bold text-slate-700 hover:bg-slate-100"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirmPayment}
-                disabled={isSubmitting}
-                className="rounded-xl bg-blue-600 px-6 py-3 text-sm font-bold text-white hover:bg-blue-700 disabled:bg-slate-300"
-              >
-                {isSubmitting ? "SAVING BILL..." : "SAVE PAYMENT"}
-              </button>
-            </div>
-          </div>
-        </div>
+        <PaymentModal
+          activeBill={activeBill}
+          addPaymentRow={addPaymentRow}
+          billDiscountType={billDiscountType}
+          billDiscountValue={billDiscountValue}
+          closePaymentModal={closePaymentModal}
+          formatCurrency={formatCurrency}
+          handleConfirmPayment={handleConfirmPayment}
+          isSubmitting={isSubmitting}
+          paymentDifference={paymentDifference}
+          paymentError={paymentError}
+          paymentMethods={PAYMENT_METHODS}
+          paymentRows={paymentRows}
+          paymentTotal={paymentTotal}
+          removePaymentRow={removePaymentRow}
+          setBillDiscountType={setBillDiscountType}
+          setBillDiscountValue={setBillDiscountValue}
+          totals={totals}
+          updatePaymentRow={updatePaymentRow}
+        />
       )}
 
       {completedBill && (
@@ -576,7 +606,8 @@ export default function NewBill() {
               Bill Ready For Print
             </h2>
             <p className="mt-2 text-sm text-slate-500">
-              Payment is complete. Open the PDF bill and download it for the customer.
+              Payment is complete. Open the PDF bill and download it for the
+              customer.
             </p>
 
             <div className="mt-6 grid gap-4 rounded-2xl border border-slate-200 bg-slate-50 p-5 md:grid-cols-2">
@@ -685,51 +716,15 @@ export default function NewBill() {
             </div>
           </div>
 
-          <div className="grid gap-3 md:grid-cols-5">
-            {billSlots.map((slot) => {
-              const isActive = slot.id === activeSlotId;
-              const isOccupied =
-                slot.customerName.trim() ||
-                slot.contactNumber.trim() ||
-                slot.selectedSalesman ||
-                slot.cart.length > 0;
-
-              return (
-                <button
-                  key={slot.id}
-                  type="button"
-                  onClick={() => {
-                    setActiveSlotId(slot.id);
-                    setSearchResults([]);
-                  }}
-                  className={`rounded-2xl border p-4 text-left transition-colors ${
-                    isActive
-                      ? "border-blue-500 bg-blue-50 text-blue-900"
-                      : "border-slate-200 bg-white hover:border-slate-300"
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-sm font-bold">{slot.label}</span>
-                    <span
-                      className={`rounded-full px-2 py-1 text-[11px] font-bold ${
-                        isOccupied
-                          ? "bg-emerald-100 text-emerald-700"
-                          : "bg-slate-100 text-slate-500"
-                      }`}
-                    >
-                      {isOccupied ? "On Hold" : "Empty"}
-                    </span>
-                  </div>
-                  <div className="mt-3 truncate text-base font-bold">
-                    {getSlotDisplayName(slot)}
-                  </div>
-                  <div className="mt-2 text-xs text-slate-500">
-                    {slot.cart.length} item{slot.cart.length === 1 ? "" : "s"}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
+          <BillSlots
+            billSlots={billSlots}
+            activeSlotId={activeSlotId}
+            getSlotDisplayName={getSlotDisplayName}
+            onSelectSlot={(slotId) => {
+              setActiveSlotId(slotId);
+              setSearchResults([]);
+            }}
+          />
         </div>
 
         <div className="mb-8 space-y-4">
@@ -740,7 +735,12 @@ export default function NewBill() {
             <button
               type="button"
               onClick={clearActiveBill}
-              disabled={activeBill.cart.length === 0 && !activeBill.customerName && !activeBill.contactNumber && !activeBill.selectedSalesman}
+              disabled={
+                activeBill.cart.length === 0 &&
+                !activeBill.customerName &&
+                !activeBill.contactNumber &&
+                !activeBill.selectedSalesman
+              }
               className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40"
             >
               Clear This Bill
@@ -823,18 +823,21 @@ export default function NewBill() {
               )}
           </div>
 
-          <div className="relative">
+          <div className="relative" ref={productSearchRef}>
             <label className="mb-2 block text-sm font-bold text-slate-600">
               Product Search
             </label>
             <input
               type="text"
-              placeholder="Search..."
+              placeholder="Search by name, category, or barcode..."
               className="w-full rounded-xl border-2 border-slate-200 p-3 outline-none focus:border-blue-500"
               value={activeBill.searchQuery}
-              onChange={(e) => updateActiveBill({ searchQuery: e.target.value })}
+              onChange={(e) =>
+                updateActiveBill({ searchQuery: e.target.value })
+              }
+              onFocus={() => setIsProductSearchFocused(true)}
             />
-            {searchResults.length > 0 && (
+            {isProductSearchFocused && searchResults.length > 0 && (
               <div className="absolute z-20 mt-1 max-h-60 w-full overflow-y-auto rounded-xl border bg-white shadow-2xl">
                 {searchResults.map((p) => (
                   <div
@@ -865,7 +868,7 @@ export default function NewBill() {
                   Price
                 </th>
                 <th className="p-4 text-right font-bold text-slate-600">
-                  Disc (%)
+                  Disc
                 </th>
                 <th className="p-4 text-right font-bold text-slate-600">
                   Total
@@ -901,20 +904,41 @@ export default function NewBill() {
                         </button>
                       </div>
                     </td>
-                    <td className="p-4 text-right">{formatCurrency(item.price)}</td>
                     <td className="p-4 text-right">
-                      <input
-                        type="number"
-                        className="w-16 border-b border-slate-300 bg-transparent text-right outline-none"
-                        min="0"
-                        max="100"
-                        step="0.01"
-                        value={item.discount === 0 ? "" : item.discount}
-                        onChange={(e) => updateDiscount(item.id, e.target.value)}
-                      />
+                      {formatCurrency(item.price)}
+                    </td>
+                    <td className="p-4 text-right">
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => toggleDiscountType(item.id)}
+                          className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-black text-slate-700 hover:bg-slate-100"
+                          aria-label={`Switch discount type for ${item.name}`}
+                          title="Toggle discount type"
+                        >
+                          {(item.discountType || "PERCENT") === "AMOUNT"
+                            ? "₹"
+                            : "%"}
+                        </button>
+                        <input
+                          type="number"
+                          className="w-20 border-b border-slate-300 bg-transparent text-right outline-none"
+                          min="0"
+                          max={
+                            (item.discountType || "PERCENT") === "AMOUNT"
+                              ? undefined
+                              : 100
+                          }
+                          step="0.01"
+                          value={item.discount === 0 ? "" : item.discount}
+                          onChange={(e) =>
+                            updateDiscount(item.id, e.target.value)
+                          }
+                        />
+                      </div>
                     </td>
                     <td className="p-4 text-right font-bold text-blue-600">
-                      {formatCurrency(getDiscountedPrice(item) * item.qty)}
+                      {formatCurrency(getDiscountedUnitPrice(item) * item.qty)}
                     </td>
                     <td className="p-4 text-center">
                       <button
@@ -930,8 +954,12 @@ export default function NewBill() {
                 ))
               ) : (
                 <tr>
-                  <td colSpan="6" className="p-8 text-center text-sm text-slate-500">
-                    This held bill is empty. Search products to start adding items.
+                  <td
+                    colSpan="6"
+                    className="p-8 text-center text-sm text-slate-500"
+                  >
+                    This held bill is empty. Search products to start adding
+                    items.
                   </td>
                 </tr>
               )}
@@ -956,7 +984,7 @@ export default function NewBill() {
               !activeBill.selectedSalesman ||
               isSubmitting
             }
-            className="mt-4 rounded-xl bg-blue-600 px-12 py-4 font-bold text-white hover:bg-blue-700 disabled:bg-slate-200"
+            className="mt-4 rounded-xl bg-blue-600 px-12 py-4 font-bold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500 disabled:hover:bg-slate-200"
           >
             COMPLETE BILLING
           </button>
