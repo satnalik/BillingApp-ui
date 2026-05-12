@@ -1,10 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import api from "./api";
+import {
+  getCustomerDirectory,
+  invalidateCustomerDirectoryCache,
+} from "./customerDirectoryCache";
 import BillSlots from "./components/newbill/BillSlots";
 import PaymentModal from "./components/newbill/PaymentModal";
 
 const HOLD_LIMIT = 5;
-const PAYMENT_METHODS = ["Cash", "Card", "UPI", "Credit"];
+const PAYMENT_METHODS = ["Cash", "Card", "UPI"];
 
 function createEmptyBillSlot(slotNumber) {
   return {
@@ -31,6 +35,13 @@ function formatCurrency(value) {
   return `Rs ${Number(value || 0).toFixed(2)}`;
 }
 
+function formatPercent(rate) {
+  const pct = Number(rate) * 100;
+  if (!Number.isFinite(pct)) return "0%";
+  const formatted = pct.toFixed(2).replace(/\.?0+$/, "");
+  return `${formatted}%`;
+}
+
 function getDiscountedUnitPrice(item) {
   const price = Number(item.price) || 0;
   const discountValue = Number(item.discount) || 0;
@@ -42,6 +53,15 @@ function getDiscountedUnitPrice(item) {
 
   const discountPercent = Math.min(100, Math.max(0, discountValue));
   return Math.max(0, price - (price * discountPercent) / 100);
+}
+
+function getLooseAmount(item) {
+  const qty = Number(item?.qty);
+  const unit = getDiscountedUnitPrice(item);
+  if (!Number.isFinite(qty) || !Number.isFinite(unit)) return "";
+  const total = qty * unit;
+  if (!Number.isFinite(total)) return "";
+  return total.toFixed(2);
 }
 
 function toDiscountPercent(item) {
@@ -71,9 +91,21 @@ function getSlotDisplayName(slot) {
   return slot.label;
 }
 
+function isLooseItem(item) {
+  return String(item?.itemType ?? "").trim().toUpperCase() === "LOOSE";
+}
+
 export default function NewBill() {
   const [salesmen, setSalesmen] = useState([]);
   const [products, setProducts] = useState([]);
+  const [tenantSettings, setTenantSettings] = useState({
+    gstEnabled: true,
+    gstRate: 0.18,
+  });
+  const [customerDirectory, setCustomerDirectory] = useState({
+    names: [],
+    byNameLower: {},
+  });
   const [billSlots, setBillSlots] = useState(() =>
     Array.from({ length: HOLD_LIMIT }, (_, index) =>
       createEmptyBillSlot(index + 1),
@@ -88,10 +120,13 @@ export default function NewBill() {
   const [paymentRows, setPaymentRows] = useState([]);
   const [paymentError, setPaymentError] = useState("");
   const [completedBill, setCompletedBill] = useState(null);
-  const [billDiscountType, setBillDiscountType] = useState("PERCENT"); // PERCENT | AMOUNT
-  const [billDiscountValue, setBillDiscountValue] = useState("");
+  const [instantDiscountAmount, setInstantDiscountAmount] = useState("");
+  const [isDueOnlyPayment, setIsDueOnlyPayment] = useState(false);
+  const [isCustomerSearchOpen, setIsCustomerSearchOpen] = useState(false);
   const [isProductSearchFocused, setIsProductSearchFocused] = useState(false);
+  const customerSearchRef = useRef(null);
   const productSearchRef = useRef(null);
+  const productSearchInputRef = useRef(null);
 
   const activeBill =
     billSlots.find((slot) => slot.id === activeSlotId) || billSlots[0];
@@ -105,24 +140,68 @@ export default function NewBill() {
       baseTaxable += itemTaxable;
     });
 
-    const discountNumeric =
-      billDiscountValue === "" ? 0 : Number(billDiscountValue) || 0;
+    const taxable = Math.max(0, baseTaxable);
 
-    const billDiscountAmount =
-      billDiscountType === "AMOUNT"
-        ? Math.max(0, Math.min(baseTaxable, discountNumeric))
-        : Math.max(
-            0,
-            Math.min(baseTaxable, (baseTaxable * discountNumeric) / 100),
-          );
+    const gstEnabled = Boolean(tenantSettings?.gstEnabled);
+    const gstRateRaw = Number(tenantSettings?.gstRate);
+    const gstRate = Number.isFinite(gstRateRaw) ? Math.max(0, gstRateRaw) : 0.18;
+    const gstAmount = gstEnabled ? taxable * gstRate : 0;
+    const grandTotal = taxable + gstAmount;
 
-    const taxable = Math.max(0, baseTaxable - billDiscountAmount);
-    const cgst = taxable * 0.09;
-    const sgst = taxable * 0.09;
-    const grandTotal = taxable + cgst + sgst;
+    return {
+      baseTaxable,
+      taxable,
+      gstEnabled,
+      gstRate,
+      gstAmount,
+      grandTotal,
+    };
+  }, [activeBill.cart, tenantSettings]);
 
-    return { baseTaxable, billDiscountAmount, taxable, cgst, sgst, grandTotal };
-  }, [activeBill.cart, billDiscountType, billDiscountValue]);
+  const normalizedInstantDiscount = useMemo(() => {
+    const raw = instantDiscountAmount === "" ? 0 : Number(instantDiscountAmount);
+    const numeric = Number.isFinite(raw) ? Math.max(0, raw) : 0;
+    return Math.min(totals.grandTotal, numeric);
+  }, [instantDiscountAmount, totals.grandTotal]);
+
+  const amountToCollect = useMemo(
+    () => Math.max(0, totals.grandTotal - normalizedInstantDiscount),
+    [normalizedInstantDiscount, totals.grandTotal],
+  );
+
+  useEffect(() => {
+    if (!isPaymentModalOpen) return;
+
+    setPaymentRows((prev) => {
+      if (!prev.length) return prev;
+
+      if (prev.length === 1) {
+        return [{ ...prev[0], amount: amountToCollect.toFixed(2) }];
+      }
+
+      const sumExcludingFirst = prev
+        .slice(1)
+        .reduce((sum, row) => sum + (parseFloat(row.amount) || 0), 0);
+      const remainingForFirst = Math.max(0, amountToCollect - sumExcludingFirst);
+      return prev.map((row, index) =>
+        index === 0 ? { ...row, amount: remainingForFirst.toFixed(2) } : row,
+      );
+    });
+  }, [amountToCollect, isPaymentModalOpen]);
+
+  useEffect(() => {
+    if (!isPaymentModalOpen) return;
+
+    if (isDueOnlyPayment) {
+      setPaymentRows([]);
+      return;
+    }
+
+    setPaymentRows((prev) => {
+      if (prev.length > 0) return prev;
+      return [createPaymentRow(amountToCollect.toFixed(2))];
+    });
+  }, [amountToCollect, isDueOnlyPayment, isPaymentModalOpen]);
 
   useEffect(() => {
     const fetchSalesmen = async () => {
@@ -155,6 +234,63 @@ export default function NewBill() {
     };
 
     loadProducts();
+  }, []);
+
+  useEffect(() => {
+    const loadCustomers = async () => {
+      try {
+        const directory = await getCustomerDirectory(api);
+        setCustomerDirectory(directory);
+      } catch (err) {
+        console.error("Customer directory load failed:", err);
+        setCustomerDirectory({ names: [], byNameLower: {} });
+      }
+    };
+
+    loadCustomers();
+  }, []);
+
+  useEffect(() => {
+    if (!isCustomerSearchOpen) return undefined;
+
+    const handlePointerDown = (event) => {
+      if (!customerSearchRef.current) return;
+      if (customerSearchRef.current.contains(event.target)) return;
+      setIsCustomerSearchOpen(false);
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("touchstart", handlePointerDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("touchstart", handlePointerDown);
+    };
+  }, [isCustomerSearchOpen]);
+
+  const customerSuggestions = useMemo(() => {
+    const query = String(activeBill?.customerName ?? "").trim().toLowerCase();
+    if (!query) return customerDirectory.names.slice(0, 20);
+    if (query.length < 2) return customerDirectory.names.slice(0, 20);
+    return customerDirectory.names
+      .filter((name) => name.toLowerCase().includes(query))
+      .slice(0, 20);
+  }, [activeBill?.customerName, customerDirectory.names]);
+
+  useEffect(() => {
+    const loadTenantSettings = async () => {
+      try {
+        const response = await api.get("/tenant/settings");
+        const data = response.data ?? {};
+        setTenantSettings((prev) => ({
+          ...prev,
+          ...data,
+        }));
+      } catch (err) {
+        console.error("Tenant settings load failed:", err);
+      }
+    };
+
+    loadTenantSettings();
   }, []);
 
   useEffect(() => {
@@ -260,19 +396,39 @@ export default function NewBill() {
     let nextCart;
 
     if (existing) {
-      const nextQty = existing.qty + 1;
-      if (nextQty > existing.stockQuantity) {
+      const step = isLooseItem(existing) ? 0.1 : 1;
+      const nextQty = Number(existing.qty) + step;
+      if (nextQty > Number(existing.stockQuantity)) {
         setToast(`${product.name} is out of stock.`);
         return;
       }
 
-      nextCart = activeBill.cart.map((item) =>
-        item.id === product.id ? { ...item, qty: nextQty } : item,
-      );
+      nextCart = activeBill.cart.map((item) => {
+        if (item.id !== product.id) return item;
+        const next = { ...item, qty: nextQty };
+        if (isLooseItem(next)) {
+          return { ...next, looseAmount: getLooseAmount(next) };
+        }
+        return next;
+      });
     } else {
+      const itemType = String(product.itemType ?? "PACKAGE").toUpperCase();
+      const defaultQty = itemType === "LOOSE" ? 0.5 : 1;
+      const baseItem = {
+        ...product,
+        price: Number(product.price ?? product.sellingPrice ?? 0),
+        itemType,
+        qty: defaultQty,
+        discount: 0,
+        discountType: "PERCENT",
+      };
+      const nextItem =
+        itemType === "LOOSE"
+          ? { ...baseItem, looseAmount: getLooseAmount(baseItem) }
+          : baseItem;
       nextCart = [
         ...activeBill.cart,
-        { ...product, qty: 1, discount: 0, discountType: "PERCENT" },
+        nextItem,
       ];
     }
 
@@ -284,19 +440,115 @@ export default function NewBill() {
     setIsProductSearchFocused(false);
   };
 
-  const updateQty = (id, delta) => {
+  const normalizeBarcode = (value) => String(value ?? "").trim().toLowerCase();
+
+  const handleProductSearchKeyDown = (event) => {
+    if (event.key !== "Enter") return;
+
+    const query = normalizeBarcode(activeBill?.searchQuery);
+    if (!query) return;
+
+    const exactMatch = products.find(
+      (product) => normalizeBarcode(product?.barcode) === query,
+    );
+
+    event.preventDefault();
+
+    if (exactMatch) {
+      addToCart(exactMatch);
+      requestAnimationFrame(() => productSearchInputRef.current?.focus());
+      return;
+    }
+
+    setToast(`Barcode ${activeBill.searchQuery.trim()} not found.`);
+    requestAnimationFrame(() => {
+      const input = productSearchInputRef.current;
+      if (!input) return;
+      input.focus();
+      if (typeof input.select === "function") input.select();
+    });
+  };
+
+  const clampQty = (item, nextQtyRaw) => {
+    const stock = Number(item.stockQuantity) || 0;
+    const nextQty = Number(nextQtyRaw);
+    if (!Number.isFinite(nextQty) || nextQty <= 0) return item.qty;
+    if (stock > 0 && nextQty > stock) return stock;
+
+    if (isLooseItem(item)) {
+      return Math.max(0.01, nextQty);
+    }
+
+    return Math.max(1, Math.round(nextQty));
+  };
+
+  const setQty = (id, nextQtyRaw) => {
     const nextCart = activeBill.cart.map((item) => {
       if (item.id !== id) return item;
 
-      const stock = Number(item.stockQuantity) || 0;
-      const newQty = item.qty + delta;
-
-      if (delta > 0 && newQty > stock) {
-        setToast(`${item.name} is out of stock.`);
-        return item;
+      // For loose items, allow typing freely (e.g. "0."), normalize on blur.
+      if (isLooseItem(item)) {
+        const next = { ...item, qty: nextQtyRaw };
+        const computed = getLooseAmount({ ...next, qty: Number(nextQtyRaw) });
+        return { ...next, looseAmount: computed || next.looseAmount || "" };
       }
 
-      return { ...item, qty: Math.max(1, newQty) };
+      return { ...item, qty: clampQty(item, nextQtyRaw) };
+    });
+
+    updateActiveBill({ cart: nextCart });
+  };
+
+  const normalizeQty = (id) => {
+    const nextCart = activeBill.cart.map((item) => {
+      if (item.id !== id) return item;
+      const nextQty = clampQty(item, item.qty);
+      const next = { ...item, qty: nextQty };
+      if (isLooseItem(next)) {
+        return { ...next, looseAmount: getLooseAmount(next) };
+      }
+      return next;
+    });
+
+    updateActiveBill({ cart: nextCart });
+  };
+
+  const setLooseAmount = (id, nextAmountRaw) => {
+    const nextCart = activeBill.cart.map((item) => {
+      if (item.id !== id) return item;
+      if (!isLooseItem(item)) return item;
+
+      const amount = nextAmountRaw === "" ? "" : Number(nextAmountRaw);
+      const unit = getDiscountedUnitPrice(item);
+      if (nextAmountRaw === "") {
+        return { ...item, looseAmount: "" };
+      }
+
+      if (!Number.isFinite(amount) || amount < 0 || unit <= 0) {
+        return { ...item, looseAmount: nextAmountRaw };
+      }
+
+      const computedQty = amount / unit;
+      const nextQty = clampQty(item, computedQty);
+      const next = { ...item, qty: Number(nextQty.toFixed(2)), looseAmount: Number(amount).toFixed(2) };
+      return next;
+    });
+
+    updateActiveBill({ cart: nextCart });
+  };
+
+  const updateQty = (id, delta) => {
+    const nextCart = activeBill.cart.map((item) => {
+      if (item.id !== id) return item;
+      const step = isLooseItem(item) ? 0.1 : 1;
+      const nextQty = Number(item.qty) + step * delta;
+      const clamped = clampQty(item, nextQty);
+      if (delta > 0 && Number(clamped) >= Number(item.stockQuantity)) {
+        if (Number(nextQty) > Number(item.stockQuantity)) {
+          setToast(`${item.name} is out of stock.`);
+        }
+      }
+      return { ...item, qty: clamped };
     });
 
     updateActiveBill({ cart: nextCart });
@@ -314,7 +566,11 @@ export default function NewBill() {
 
         const numValue =
           value === "" ? 0 : Math.min(100, Math.max(0, parseFloat(value) || 0));
-        return { ...item, discount: numValue };
+        const next = { ...item, discount: numValue };
+        if (isLooseItem(next)) {
+          return { ...next, looseAmount: getLooseAmount(next) };
+        }
+        return next;
       }),
     });
   };
@@ -325,7 +581,11 @@ export default function NewBill() {
         if (item.id !== id) return item;
         const current = item.discountType || "PERCENT";
         const next = current === "PERCENT" ? "AMOUNT" : "PERCENT";
-        return { ...item, discountType: next, discount: 0 };
+        const updated = { ...item, discountType: next, discount: 0 };
+        if (isLooseItem(updated)) {
+          return { ...updated, looseAmount: getLooseAmount(updated) };
+        }
+        return updated;
       }),
     });
   };
@@ -356,11 +616,24 @@ export default function NewBill() {
     });
   };
 
+  const handleSalesmanKeyDown = (event) => {
+    if (event.key !== "Enter") return;
+    if (activeBill.selectedSalesman) return;
+
+    const query = activeBill.salesmanQuery.trim();
+    if (!query) return;
+
+    if (filteredSalesmen.length === 0) return;
+
+    event.preventDefault();
+    handleSalesmanSelect(filteredSalesmen[0]);
+  };
+
   const paymentTotal = paymentRows.reduce(
     (sum, row) => sum + (parseFloat(row.amount) || 0),
     0,
   );
-  const paymentDifference = totals.grandTotal - paymentTotal;
+  const paymentDifference = amountToCollect - paymentTotal;
 
   const formattedDayTime = currentTime.toLocaleString("en-IN", {
     weekday: "long",
@@ -385,9 +658,9 @@ export default function NewBill() {
       return;
     }
 
+    setInstantDiscountAmount("");
+    setIsDueOnlyPayment(false);
     setPaymentRows([createPaymentRow(totals.grandTotal.toFixed(2))]);
-    setBillDiscountType("PERCENT");
-    setBillDiscountValue("");
     setPaymentError("");
     setIsPaymentModalOpen(true);
   };
@@ -413,7 +686,7 @@ export default function NewBill() {
       const adjustableIndex = nextRows.findIndex((row) => row.id !== id);
       if (adjustableIndex === -1) return nextRows;
 
-      const totalToCollect = totals.grandTotal;
+      const totalToCollect = amountToCollect;
       const sumExcludingAdjustable = nextRows.reduce((sum, row, index) => {
         if (index === adjustableIndex) return sum;
         return sum + (parseFloat(row.amount) || 0);
@@ -484,15 +757,19 @@ export default function NewBill() {
   const handleConfirmPayment = async () => {
     if (isSubmitting) return;
 
-    const normalizedPayments = paymentRows.map((row) => ({
-      ...row,
-      amount: parseFloat(row.amount) || 0,
-    }));
+    const normalizedPayments = isDueOnlyPayment
+      ? []
+      : paymentRows.map((row) => ({
+          ...row,
+          amount: parseFloat(row.amount) || 0,
+        }));
 
-    const hasInvalidAmount = normalizedPayments.some((row) => row.amount <= 0);
-    if (hasInvalidAmount) {
-      setPaymentError("Enter a valid amount for each payment method.");
-      return;
+    if (!isDueOnlyPayment) {
+      const hasInvalidAmount = normalizedPayments.some((row) => row.amount <= 0);
+      if (hasInvalidAmount) {
+        setPaymentError("Enter a valid amount for each payment method.");
+        return;
+      }
     }
 
     const normalizedTotal = normalizedPayments.reduce(
@@ -500,8 +777,8 @@ export default function NewBill() {
       0,
     );
 
-    if (Math.abs(normalizedTotal - totals.grandTotal) > 0.05) {
-      setPaymentError("Payment split must match the full bill amount.");
+    if (normalizedTotal - amountToCollect > 0.05) {
+      setPaymentError("Collected amount cannot exceed the bill total.");
       return;
     }
 
@@ -519,6 +796,7 @@ export default function NewBill() {
         })),
         customerName: activeBill.customerName.trim() || "Guest",
         contactInfo: activeBill.contactNumber.trim() || "N/A",
+        instantDiscountAmount: normalizedInstantDiscount,
         payments: normalizedPayments.map((row) => ({
           method: toPaymentMethodEnum(row.method),
           amount: Number(row.amount) || 0,
@@ -537,11 +815,13 @@ export default function NewBill() {
         (response.status === 200 || response.status === 201) &&
         createdBillId
       ) {
+        invalidateCustomerDirectoryCache();
         setCompletedBill({
           id: createdBillId,
           customerName: activeBill.customerName.trim() || "Guest",
-          total: totals.grandTotal,
+          total: normalizedTotal,
           payments: normalizedPayments,
+          instantDiscountAmount: normalizedInstantDiscount,
         });
         setIsPaymentModalOpen(false);
         clearActiveBill();
@@ -577,27 +857,28 @@ export default function NewBill() {
       )}
 
       {isPaymentModalOpen && (
-        <PaymentModal
-          activeBill={activeBill}
-          addPaymentRow={addPaymentRow}
-          billDiscountType={billDiscountType}
-          billDiscountValue={billDiscountValue}
-          closePaymentModal={closePaymentModal}
-          formatCurrency={formatCurrency}
-          handleConfirmPayment={handleConfirmPayment}
-          isSubmitting={isSubmitting}
-          paymentDifference={paymentDifference}
-          paymentError={paymentError}
-          paymentMethods={PAYMENT_METHODS}
-          paymentRows={paymentRows}
-          paymentTotal={paymentTotal}
-          removePaymentRow={removePaymentRow}
-          setBillDiscountType={setBillDiscountType}
-          setBillDiscountValue={setBillDiscountValue}
-          totals={totals}
-          updatePaymentRow={updatePaymentRow}
-        />
-      )}
+          <PaymentModal
+            activeBill={activeBill}
+            addPaymentRow={addPaymentRow}
+            closePaymentModal={closePaymentModal}
+            formatCurrency={formatCurrency}
+            handleConfirmPayment={handleConfirmPayment}
+            instantDiscountAmount={instantDiscountAmount}
+            setInstantDiscountAmount={setInstantDiscountAmount}
+            isDueOnlyPayment={isDueOnlyPayment}
+            setIsDueOnlyPayment={setIsDueOnlyPayment}
+            isSubmitting={isSubmitting}
+            paymentDifference={paymentDifference}
+            paymentError={paymentError}
+            paymentMethods={PAYMENT_METHODS}
+            paymentRows={paymentRows}
+            paymentTotal={paymentTotal}
+            removePaymentRow={removePaymentRow}
+            totals={totals}
+            amountToCollect={amountToCollect}
+            updatePaymentRow={updatePaymentRow}
+          />
+        )}
 
       {completedBill && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/50 p-4">
@@ -628,6 +909,19 @@ export default function NewBill() {
                 </div>
               </div>
             </div>
+
+            {Number(completedBill.instantDiscountAmount) > 0 ? (
+              <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-5 py-4 text-sm">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-slate-700">
+                    Instant Discount
+                  </span>
+                  <span className="font-black text-slate-900">
+                    - {formatCurrency(completedBill.instantDiscountAmount)}
+                  </span>
+                </div>
+              </div>
+            ) : null}
 
             <div className="mt-5 rounded-2xl border border-slate-200">
               <div className="border-b border-slate-200 bg-slate-100 px-4 py-3 text-sm font-bold text-slate-700">
@@ -752,15 +1046,49 @@ export default function NewBill() {
               <label className="w-36 shrink-0 text-sm font-bold text-slate-600">
                 Customer Name
               </label>
-              <input
-                type="text"
-                placeholder="Enter customer name"
-                className="w-full max-w-md rounded-xl border-2 border-slate-200 p-3 outline-none focus:border-blue-500"
-                value={activeBill.customerName}
-                onChange={(e) =>
-                  updateActiveBill({ customerName: e.target.value })
-                }
-              />
+              <div className="relative w-full max-w-md" ref={customerSearchRef}>
+                <input
+                  type="text"
+                  placeholder="Enter customer name"
+                  className="w-full rounded-xl border-2 border-slate-200 p-3 outline-none focus:border-blue-500"
+                  value={activeBill.customerName}
+                  onChange={(e) => {
+                    updateActiveBill({
+                      customerName: e.target.value.slice(0, 50),
+                    });
+                    setIsCustomerSearchOpen(true);
+                  }}
+                  onFocus={() => setIsCustomerSearchOpen(true)}
+                  maxLength={50}
+                />
+
+                {isCustomerSearchOpen && customerSuggestions.length > 0 && (
+                  <div className="absolute z-20 mt-1 max-h-56 w-full overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-xl">
+                    {customerSuggestions.map((name) => (
+                      <button
+                        key={name}
+                        type="button"
+                        onClick={() => {
+                          const entry =
+                            customerDirectory.byNameLower[name.toLowerCase()];
+                          updateActiveBill({
+                            customerName: name,
+                            contactNumber:
+                              activeBill.contactNumber ||
+                              entry?.contactNumber ||
+                              "",
+                          });
+                          setIsCustomerSearchOpen(false);
+                        }}
+                        className="block w-full truncate border-b border-slate-100 px-4 py-3 text-left text-sm font-semibold text-slate-700 hover:bg-blue-50"
+                        title={name}
+                      >
+                        {name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-4">
@@ -773,8 +1101,13 @@ export default function NewBill() {
                 className="w-full max-w-md rounded-xl border-2 border-slate-200 p-3 outline-none focus:border-blue-500"
                 value={activeBill.contactNumber}
                 onChange={(e) =>
-                  updateActiveBill({ contactNumber: e.target.value })
+                  updateActiveBill({
+                    contactNumber: e.target.value.replace(/\D/g, "").slice(0, 10),
+                  })
                 }
+                inputMode="numeric"
+                pattern="[0-9]{10}"
+                maxLength={10}
               />
             </div>
           </div>
@@ -796,6 +1129,7 @@ export default function NewBill() {
                   selectedSalesman: "",
                 })
               }
+              onKeyDown={handleSalesmanKeyDown}
             />
             {activeBill.salesmanQuery.trim().length > 0 &&
               !activeBill.selectedSalesman && (
@@ -831,10 +1165,12 @@ export default function NewBill() {
               type="text"
               placeholder="Search by name, category, or barcode..."
               className="w-full rounded-xl border-2 border-slate-200 p-3 outline-none focus:border-blue-500"
+              ref={productSearchInputRef}
               value={activeBill.searchQuery}
               onChange={(e) =>
                 updateActiveBill({ searchQuery: e.target.value })
               }
+              onKeyDown={handleProductSearchKeyDown}
               onFocus={() => setIsProductSearchFocused(true)}
             />
             {isProductSearchFocused && searchResults.length > 0 && (
@@ -845,9 +1181,14 @@ export default function NewBill() {
                     onClick={() => addToCart(p)}
                     className="flex cursor-pointer justify-between border-b p-3 hover:bg-blue-50"
                   >
-                    <span>{p.name}</span>
+                    <div className="min-w-0">
+                      <div className="truncate">{p.name}</div>
+                      <div className="mt-0.5 text-xs font-semibold text-slate-500">
+                        {String(p.itemType ?? "PACKAGE").toUpperCase()}
+                      </div>
+                    </div>
                     <span className="font-bold text-blue-600">
-                      {formatCurrency(p.price)}
+                      {formatCurrency(Number(p.sellingPrice ?? p.price ?? 0))}
                     </span>
                   </div>
                 ))}
@@ -868,9 +1209,6 @@ export default function NewBill() {
                   Price
                 </th>
                 <th className="p-4 text-right font-bold text-slate-600">
-                  Disc
-                </th>
-                <th className="p-4 text-right font-bold text-slate-600">
                   Total
                 </th>
                 <th className="p-4 text-center font-bold text-slate-600">
@@ -884,58 +1222,64 @@ export default function NewBill() {
                   <tr key={item.id} className="border-t border-slate-100">
                     <td className="p-4 text-slate-800">{item.name}</td>
                     <td className="p-4 text-center">
-                      <div className="flex items-center justify-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => updateQty(item.id, -1)}
-                          className="h-8 w-8 rounded-full border border-slate-200 text-lg font-bold hover:bg-slate-100"
-                          aria-label={`Decrease quantity for ${item.name}`}
-                        >
-                          -
-                        </button>
-                        <span className="min-w-8 font-bold">{item.qty}</span>
-                        <button
-                          type="button"
-                          onClick={() => updateQty(item.id, 1)}
-                          className="h-8 w-8 rounded-full border border-slate-200 text-lg font-bold hover:bg-slate-100"
-                          aria-label={`Increase quantity for ${item.name}`}
-                        >
-                          +
-                        </button>
-                      </div>
+                      {isLooseItem(item) ? (
+                        <div className="flex items-center justify-center gap-2">
+                          <input
+                            type="number"
+                            min="0.01"
+                            step="0.01"
+                            value={item.qty}
+                            onChange={(e) => setQty(item.id, e.target.value)}
+                            onBlur={() => normalizeQty(item.id)}
+                            className="w-24 rounded-lg border border-slate-200 bg-white px-3 py-2 text-center font-bold outline-none focus:border-blue-500"
+                            aria-label={`Quantity for ${item.name}`}
+                          />
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => updateQty(item.id, -1)}
+                            className="h-8 w-8 rounded-full border border-slate-200 text-lg font-bold hover:bg-slate-100"
+                            aria-label={`Decrease quantity for ${item.name}`}
+                          >
+                            -
+                          </button>
+                          <span className="min-w-8 font-bold">{item.qty}</span>
+                          <button
+                            type="button"
+                            onClick={() => updateQty(item.id, 1)}
+                            className="h-8 w-8 rounded-full border border-slate-200 text-lg font-bold hover:bg-slate-100"
+                            aria-label={`Increase quantity for ${item.name}`}
+                          >
+                            +
+                          </button>
+                        </div>
+                      )}
                     </td>
                     <td className="p-4 text-right">
-                      {formatCurrency(item.price)}
-                    </td>
-                    <td className="p-4 text-right">
-                      <div className="flex items-center justify-end gap-2">
-                        <button
-                          type="button"
-                          onClick={() => toggleDiscountType(item.id)}
-                          className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-black text-slate-700 hover:bg-slate-100"
-                          aria-label={`Switch discount type for ${item.name}`}
-                          title="Toggle discount type"
-                        >
-                          {(item.discountType || "PERCENT") === "AMOUNT"
-                            ? "₹"
-                            : "%"}
-                        </button>
+                      {isLooseItem(item) ? (
                         <input
                           type="number"
-                          className="w-20 border-b border-slate-300 bg-transparent text-right outline-none"
                           min="0"
-                          max={
-                            (item.discountType || "PERCENT") === "AMOUNT"
-                              ? undefined
-                              : 100
-                          }
                           step="0.01"
-                          value={item.discount === 0 ? "" : item.discount}
+                          value={item.looseAmount ?? getLooseAmount(item)}
                           onChange={(e) =>
-                            updateDiscount(item.id, e.target.value)
+                            setLooseAmount(item.id, e.target.value)
                           }
+                          onBlur={() =>
+                            setLooseAmount(
+                              item.id,
+                              String(item.looseAmount ?? "").trim(),
+                            )
+                          }
+                          className="w-28 rounded-lg border border-slate-200 bg-white px-3 py-2 text-right font-bold outline-none focus:border-blue-500"
+                          aria-label={`Enter total amount for ${item.name}`}
+                          title="Enter total amount (Rs)"
                         />
-                      </div>
+                      ) : (
+                        formatCurrency(item.price)
+                      )}
                     </td>
                     <td className="p-4 text-right font-bold text-blue-600">
                       {formatCurrency(getDiscountedUnitPrice(item) * item.qty)}
@@ -955,7 +1299,7 @@ export default function NewBill() {
               ) : (
                 <tr>
                   <td
-                    colSpan="6"
+                    colSpan="5"
                     className="p-8 text-center text-sm text-slate-500"
                   >
                     This held bill is empty. Search products to start adding
@@ -970,8 +1314,12 @@ export default function NewBill() {
         <div className="flex flex-col items-end gap-2 border-t pt-6">
           <div className="text-right text-sm text-slate-500">
             <p>Taxable: {formatCurrency(totals.taxable)}</p>
-            <p>CGST (9%): {formatCurrency(totals.cgst)}</p>
-            <p>SGST (9%): {formatCurrency(totals.sgst)}</p>
+            {totals.gstEnabled ? (
+              <p>
+                GST ({formatPercent(totals.gstRate)}):{" "}
+                {formatCurrency(totals.gstAmount)}
+              </p>
+            ) : null}
           </div>
           <h2 className="text-5xl font-black text-slate-900">
             {formatCurrency(totals.grandTotal)}

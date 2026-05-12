@@ -55,12 +55,20 @@ export default function Login() {
         // tenantId: form.tenantId,
       });
 
+      const userData = response?.data?.UserData ?? response?.data?.userData ?? null;
+
       // Verification of token key from backend
       const token = response.data.token || response.data.jwt;
 
       if (token) {
         localStorage.setItem("token", token);
         localStorage.setItem("userId", form.userId);
+        if (userData && typeof userData === "object") {
+          localStorage.setItem("user", JSON.stringify(userData));
+          if (userData.tenantId) {
+            localStorage.setItem("tenantId", String(userData.tenantId));
+          }
+        }
 
         // Extract tenantId from JWT (assume JWT is in format header.payload.signature)
         try {

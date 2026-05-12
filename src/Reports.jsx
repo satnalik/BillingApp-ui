@@ -925,7 +925,15 @@ function SalesSummaryReport() {
       "totalAmount",
       "grandTotal",
     ]);
-    const bills = pickFirst(data, ["totalBills", "billsCount", "billCount"]);
+    const bills = pickFirst(data, [
+      "totalBills",
+      "billsCount",
+      "billCount",
+      "bills",
+      "totalBill",
+      "noOfBills",
+      "noOfBill",
+    ]);
     const items =
       pickFirst(data, [
         "totalItems",
@@ -946,9 +954,27 @@ function SalesSummaryReport() {
     );
     const itemsFinal = asNumber(items) || derivedItems;
 
+    const derivedBills = (() => {
+      const candidates = [
+        "bills",
+        "billList",
+        "billWise",
+        "salesRegister",
+        "salesRegisterRows",
+        "invoices",
+      ];
+      for (const key of candidates) {
+        const value = data?.[key];
+        if (Array.isArray(value)) return value.length;
+      }
+      return 0;
+    })();
+
+    const billsFinal = asNumber(bills) || derivedBills;
+
     return {
       totalSales: asNumber(totalSales),
-      bills: asNumber(bills),
+      bills: billsFinal,
       items: itemsFinal,
     };
   }, [data]);

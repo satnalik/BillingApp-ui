@@ -80,36 +80,6 @@ function roundToPaise(value) {
   return Math.round(numberOrZero(value) * 100) / 100;
 }
 
-function buildPaymentsForDisplay(bill) {
-  const raw = asArray(bill?.payments);
-  if (raw.length <= 1) return raw;
-
-  // Some backends record credit movements as a +amount and a matching -amount.
-  // Group by method/reference and hide net-zero groups for a clearer UI.
-  const grouped = new Map();
-  const order = [];
-
-  for (const p of raw) {
-    const method = String(p?.method ?? "-");
-    const reference = p?.reference == null || p?.reference === "" ? "-" : String(p.reference);
-    const key = `${method}|${reference}`;
-    const amount = roundToPaise(p?.amount);
-
-    if (!grouped.has(key)) {
-      grouped.set(key, { ...p, method, reference: reference === "-" ? null : reference, amount: 0 });
-      order.push(key);
-    }
-
-    const current = grouped.get(key);
-    current.amount = roundToPaise(numberOrZero(current.amount) + amount);
-    grouped.set(key, current);
-  }
-
-  return order
-    .map((key) => grouped.get(key))
-    .filter((p) => Math.abs(roundToPaise(p?.amount)) >= 0.01);
-}
-
 function buildItemsForDisplay(items) {
   const raw = asArray(items);
   if (raw.length <= 1) return raw;
@@ -287,7 +257,6 @@ export default function GetBill() {
     return asArray(tryGetBillItems(bill));
   }, [bill]);
 
-  const displayPayments = useMemo(() => buildPaymentsForDisplay(bill), [bill]);
   const displayItems = useMemo(() => buildItemsForDisplay(items), [items]);
 
   const handleFetch = async (e) => {
@@ -359,7 +328,34 @@ export default function GetBill() {
         throw lastError || new Error("No data returned for this bill.");
       }
 
-      setBill(bestData);
+      // Merge server data with existing optimistic updates to preserve timestamps
+      setBill((currentBill) => {
+        const serverPayments = asArray(bestData.payments);
+        const currentPayments = asArray(currentBill?.payments);
+        
+        // Create a map of locally created payments to preserve their timestamps
+        const localPaymentMap = new Map();
+        currentPayments.forEach(payment => {
+          if (payment.id?.startsWith('local-')) {
+            localPaymentMap.set(`${payment.method}-${payment.amount}-${payment.reference || ''}`, payment);
+          }
+        });
+        
+        // Merge server payments with local timestamps
+        const mergedPayments = serverPayments.map(serverPayment => {
+          const localKey = `${serverPayment.method}-${serverPayment.amount}-${serverPayment.reference || ''}`;
+          const localPayment = localPaymentMap.get(localKey);
+          
+          if (localPayment && !serverPayment.createdAt) {
+            // Preserve timestamp from optimistic update if server doesn't provide it
+            return { ...serverPayment, createdAt: localPayment.createdAt };
+          }
+          
+          return serverPayment;
+        });
+        
+        return { ...bestData, payments: mergedPayments };
+      });
     } catch (err) {
       console.error("Get bill failed:", err);
       setError(err.response?.data?.message || "Bill not found.");
@@ -626,29 +622,69 @@ export default function GetBill() {
                       <th className="p-4 text-sm font-bold text-slate-600">
                         Reference
                       </th>
+                      <th className="p-4 text-sm font-bold text-slate-600">
+                        Timestamp
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
-                    {displayPayments.length > 0 ? (
-                      displayPayments.map((p, idx) => (
-                        <tr
-                          key={p.id ?? `${p.method}-${idx}`}
-                          className="border-t border-slate-100"
-                        >
-                          <td className="p-4 text-slate-800">
-                            {toDisplay(p.method)}
-                          </td>
-                          <td className="p-4 text-right font-semibold text-slate-900">
-                            {Number(p.amount ?? 0).toFixed(2)}
-                          </td>
-                          <td className="p-4 text-slate-700">
-                            {toDisplay(p.reference)}
-                          </td>
-                        </tr>
-                      ))
+                    {asArray(bill?.payments).length > 0 ? (
+                      asArray(bill?.payments).map((p, idx) => {
+                        // For the first payment row, show bill createdAt
+                        // For subsequent rows, show payment createdAt with better fallbacks
+                        let timestamp;
+                       if (idx === 0) {
+                         timestamp = bill?.createdAt ?? bill?.createdOn ?? bill?.createdDate;
+                       } else {
+                         timestamp = p.createdAt ?? p.timestamp ?? p.createdOn ?? p.date ?? p.created ?? p.time;
+                         // If no timestamp from server, use current time as fallback for recent payments
+                          if (!timestamp && p.id?.startsWith('local-')) {
+                            timestamp = new Date().toISOString();
+                          }
+
+                          // If server doesn't return timestamps, at least show the moment we confirmed payment.
+                          if (!timestamp && bill?.id) {
+                            const key = `${bill.id}|${String(p?.method ?? "")}|${Number(p?.amount ?? 0)}|${p?.reference ?? ""}`;
+                            if (recentPayment.key === key && recentPayment.at) {
+                              timestamp = recentPayment.at;
+                            }
+                          }
+
+                          // Last fallback: use bill's updated time if present (covers server-added CREDIT rows).
+                          if (!timestamp) {
+                            timestamp =
+                              bill?.updatedAt ??
+                              bill?.updatedOn ??
+                              bill?.updatedDate ??
+                              bill?.modifiedAt ??
+                              bill?.modifiedOn ??
+                              null;
+                          }
+                        }
+                        
+                        return (
+                          <tr
+                            key={p.id ?? `${p.method}-${idx}`}
+                            className="border-t border-slate-100"
+                          >
+                            <td className="p-4 text-slate-800">
+                              {toDisplay(p.method)}
+                            </td>
+                            <td className="p-4 text-right font-semibold text-slate-900">
+                              {Number(p.amount ?? 0).toFixed(2)}
+                            </td>
+                            <td className="p-4 text-slate-700">
+                              {toDisplay(p.reference)}
+                            </td>
+                            <td className="p-4 text-slate-700">
+                              {toHumanDateTime(timestamp)}
+                            </td>
+                          </tr>
+                        );
+                      })
                     ) : (
                       <tr>
-                        <td colSpan="3" className="p-6 text-sm text-slate-500">
+                        <td colSpan="4" className="p-6 text-sm text-slate-500">
                           No payments recorded for this bill.
                         </td>
                       </tr>

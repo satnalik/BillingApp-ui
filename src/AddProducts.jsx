@@ -1,14 +1,16 @@
 import React, { useEffect, useMemo, useState } from "react";
 import api from "./api";
+import { fetchSuppliers, formatSupplierOption } from "./supplierApi";
 
 const initialForm = {
   barcode: "",
   name: "",
+  itemType: "PACKAGE",
   sellingPrice: "",
   mrp: "",
   costPrice: "",
   landingPrice: "",
-  supplierName: "",
+  supplierId: "",
   stockQuantity: "",
   category: "",
 };
@@ -16,8 +18,10 @@ const initialForm = {
 export default function AddProducts() {
   const [form, setForm] = useState(initialForm);
   const [products, setProducts] = useState([]);
+  const [suppliers, setSuppliers] = useState([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [isSupplierLoading, setIsSupplierLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isEditMode, setIsEditMode] = useState(false);
@@ -43,8 +47,28 @@ export default function AddProducts() {
     }
   };
 
+  const loadSuppliers = async () => {
+    setIsSupplierLoading(true);
+
+    try {
+      const data = await fetchSuppliers();
+      setSuppliers(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error("Failed to load suppliers:", error);
+      setSuppliers([]);
+      alert(error.response?.data?.message || "Failed to load suppliers");
+    } finally {
+      setIsSupplierLoading(false);
+    }
+  };
+
   useEffect(() => {
-    loadProducts();
+    const timer = setTimeout(() => {
+      loadProducts();
+      loadSuppliers();
+    }, 0);
+
+    return () => clearTimeout(timer);
   }, []);
 
   useEffect(() => {
@@ -64,10 +88,28 @@ export default function AddProducts() {
     return products.filter((product) => {
       const name = product.name?.toLowerCase() || "";
       const category = product.category?.toLowerCase() || "";
+      const supplierName = (
+        product.supplier?.name ||
+        product.supplierName ||
+        ""
+      ).toLowerCase();
       const id = String(product.id ?? "").toLowerCase();
-      return name.includes(query) || category.includes(query) || id.includes(query);
+      return (
+        name.includes(query) ||
+        category.includes(query) ||
+        supplierName.includes(query) ||
+        id.includes(query)
+      );
     });
   }, [products, searchQuery]);
+
+  const supplierOptions = useMemo(() => {
+    return suppliers
+      .filter((supplier) => supplier?.id)
+      .sort((a, b) =>
+        String(a.name || "").localeCompare(String(b.name || "")),
+      );
+  }, [suppliers]);
 
   const handleChange = (field, value) => {
     setForm((prev) => ({
@@ -91,15 +133,23 @@ export default function AddProducts() {
 
   const openEditModal = (product) => {
     if (!product) return;
+    const matchedSupplier = suppliers.find(
+      (supplier) =>
+        product.supplierName &&
+        String(supplier.name || "").trim().toLowerCase() ===
+          String(product.supplierName).trim().toLowerCase(),
+    );
+
     setIsEditMode(true);
     setForm({
       barcode: String(product.barcode ?? "").trim(),
       name: String(product.name ?? "").trim(),
+      itemType: String(product.itemType ?? "PACKAGE").toUpperCase(),
       sellingPrice: String(product.sellingPrice ?? product.price ?? ""),
       mrp: product.mrp ?? "",
       costPrice: product.costPrice ?? "",
       landingPrice: product.landingPrice ?? "",
-      supplierName: String(product.supplierName ?? ""),
+      supplierId: String(product.supplier?.id ?? matchedSupplier?.id ?? ""),
       stockQuantity: String(product.stockQuantity ?? 0),
       category: String(product.category ?? ""),
     });
@@ -112,13 +162,24 @@ export default function AddProducts() {
     const barcode = form.barcode.trim();
     const name = form.name.trim();
     const category = form.category.trim();
+    const itemType = String(form.itemType || "PACKAGE").trim().toUpperCase();
     const sellingPrice = Number(form.sellingPrice);
     const mrp = form.mrp === "" ? null : Number(form.mrp);
     const costPrice = form.costPrice === "" ? null : Number(form.costPrice);
     const landingPrice = form.landingPrice === "" ? null : Number(form.landingPrice);
     const stockQuantity = Number(form.stockQuantity);
+    const supplierId = Number(form.supplierId);
 
-    if (!barcode || !name || !Number.isFinite(sellingPrice) || !Number.isFinite(stockQuantity) || isSaving) {
+    if (
+      !barcode ||
+      !name ||
+      (itemType !== "LOOSE" && itemType !== "PACKAGE") ||
+      !Number.isFinite(supplierId) ||
+      supplierId <= 0 ||
+      !Number.isFinite(sellingPrice) ||
+      !Number.isFinite(stockQuantity) ||
+      isSaving
+    ) {
       return;
     }
 
@@ -128,12 +189,15 @@ export default function AddProducts() {
       const payload = {
         barcode,
         name,
+        itemType,
         sellingPrice,
         price: sellingPrice,
         mrp,
         costPrice,
         landingPrice,
-        supplierName: form.supplierName.trim() || null,
+        supplier: {
+          id: supplierId,
+        },
         stockQuantity,
         category: category || null,
       };
@@ -207,6 +271,9 @@ export default function AddProducts() {
                 <th className="p-4 text-sm font-bold text-slate-600">Barcode</th>
                 <th className="p-4 text-sm font-bold text-slate-600">Name</th>
                 <th className="p-4 text-sm font-bold text-slate-600">
+                  Item Type
+                </th>
+                <th className="p-4 text-sm font-bold text-slate-600">
                   Category
                 </th>
                 <th className="p-4 text-sm font-bold text-slate-600">
@@ -235,7 +302,7 @@ export default function AddProducts() {
             <tbody>
               {isLoading ? (
                 <tr>
-                  <td colSpan="11" className="p-6 text-sm text-slate-500">
+                  <td colSpan="12" className="p-6 text-sm text-slate-500">
                     Loading products...
                   </td>
                 </tr>
@@ -252,11 +319,14 @@ export default function AddProducts() {
                       {product.barcode || "-"}
                     </td>
                     <td className="p-4 text-slate-800">{product.name}</td>
+                    <td className="p-4 text-slate-700">
+                      {String(product.itemType ?? "-").toUpperCase()}
+                    </td>
                     <td className="p-4 text-slate-600">
                       {product.category || "-"}
                     </td>
                     <td className="p-4 text-slate-700">
-                      {product.supplierName || "-"}
+                      {product.supplier?.name || product.supplierName || "-"}
                     </td>
                     <td className="p-4 text-right text-slate-700">
                       {product.costPrice === null || product.costPrice === undefined || product.costPrice === ""
@@ -292,7 +362,7 @@ export default function AddProducts() {
                 ))
               ) : (
                 <tr>
-                  <td colSpan="11" className="p-6 text-sm text-slate-500">
+                  <td colSpan="12" className="p-6 text-sm text-slate-500">
                     No products found.
                   </td>
                 </tr>
@@ -304,7 +374,7 @@ export default function AddProducts() {
 
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">
-          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-xl">
+          <div className="w-full max-w-5xl rounded-2xl border border-slate-200 bg-white p-6 shadow-xl">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-600">
@@ -323,7 +393,7 @@ export default function AddProducts() {
               </button>
             </div>
 
-            <form onSubmit={handleSubmit} className="mt-6 space-y-5">
+            <form onSubmit={handleSubmit} className="mt-6 space-y-6">
               <div>
                 <label className="mb-2 block text-sm font-bold text-slate-600">
                   Barcode
@@ -341,33 +411,49 @@ export default function AddProducts() {
                 </p>
               </div>
 
-              <div>
-                <label className="mb-2 block text-sm font-bold text-slate-600">
-                  Name
-                </label>
-                <input
-                  type="text"
-                  placeholder="Enter product name"
-                  className="w-full rounded-xl border-2 border-slate-200 p-3 outline-none focus:border-blue-500"
-                  value={form.name}
-                  onChange={(e) => handleChange("name", e.target.value)}
-                />
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div>
+                  <label className="mb-2 block text-sm font-bold text-slate-600">
+                    Name
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Enter product name"
+                    className="w-full rounded-xl border-2 border-slate-200 p-3 outline-none focus:border-blue-500"
+                    value={form.name}
+                    onChange={(e) => handleChange("name", e.target.value)}
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-2 block text-sm font-bold text-slate-600">
+                    Category
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Grocery, FMCG"
+                    className="w-full rounded-xl border-2 border-slate-200 p-3 outline-none focus:border-blue-500"
+                    value={form.category}
+                    onChange={(e) => handleChange("category", e.target.value)}
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-2 block text-sm font-bold text-slate-600">
+                    Item Type
+                  </label>
+                  <select
+                    className="w-full rounded-xl border-2 border-slate-200 bg-white p-3 outline-none focus:border-blue-500"
+                    value={form.itemType}
+                    onChange={(e) => handleChange("itemType", e.target.value)}
+                  >
+                    <option value="PACKAGE">PACKAGE</option>
+                    <option value="LOOSE">LOOSE</option>
+                  </select>
+                </div>
               </div>
 
-              <div>
-                <label className="mb-2 block text-sm font-bold text-slate-600">
-                  Category
-                </label>
-                <input
-                  type="text"
-                  placeholder="e.g. Grocery, FMCG"
-                  className="w-full rounded-xl border-2 border-slate-200 p-3 outline-none focus:border-blue-500"
-                  value={form.category}
-                  onChange={(e) => handleChange("category", e.target.value)}
-                />
-              </div>
-
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                 <div>
                   <label className="mb-2 block text-sm font-bold text-slate-600">
                     Selling Price
@@ -390,7 +476,7 @@ export default function AddProducts() {
                   <input
                     type="number"
                     min="0"
-                    step="1"
+                    step="0.01"
                     placeholder="0"
                     className="w-full rounded-xl border-2 border-slate-200 p-3 outline-none focus:border-blue-500"
                     value={form.stockQuantity}
@@ -399,7 +485,7 @@ export default function AddProducts() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                 <div>
                   <label className="mb-2 block text-sm font-bold text-slate-600">
                     MRP
@@ -416,19 +502,28 @@ export default function AddProducts() {
                 </div>
                 <div>
                   <label className="mb-2 block text-sm font-bold text-slate-600">
-                    Supplier Name
+                    Supplier
                   </label>
-                  <input
-                    type="text"
-                    placeholder="Supplier"
-                    className="w-full rounded-xl border-2 border-slate-200 p-3 outline-none focus:border-blue-500"
-                    value={form.supplierName}
-                    onChange={(e) => handleChange("supplierName", e.target.value)}
-                  />
+                  <select
+                    className="w-full rounded-xl border-2 border-slate-200 bg-white p-3 outline-none focus:border-blue-500"
+                    value={form.supplierId}
+                    onChange={(e) => handleChange("supplierId", e.target.value)}
+                    disabled={isSupplierLoading}
+                  >
+                    <option value="">
+                      {isSupplierLoading ? "Loading suppliers..." : "Select supplier"}
+                    </option>
+                    {supplierOptions.map((supplier) => (
+                      <option key={supplier.id} value={supplier.id}>
+                        {formatSupplierOption(supplier)}
+                        {supplier.active === false ? " - Inactive" : ""}
+                      </option>
+                    ))}
+                  </select>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                 <div>
                   <label className="mb-2 block text-sm font-bold text-slate-600">
                     Cost Price
@@ -473,6 +568,9 @@ export default function AddProducts() {
                     isSaving ||
                     !form.barcode.trim() ||
                     !form.name.trim() ||
+                    !form.itemType ||
+                    !Number.isFinite(Number(form.supplierId)) ||
+                    Number(form.supplierId) <= 0 ||
                     !Number.isFinite(Number(form.sellingPrice)) ||
                     !Number.isFinite(Number(form.stockQuantity))
                   }

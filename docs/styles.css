@@ -351,6 +351,8 @@ h1 {
   border-radius: 16px;
   display: grid;
   place-items: center;
+  font-size: 13px;
+  font-weight: 950;
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
@@ -582,4 +584,3 @@ h1 {
     grid-template-columns: 1fr;
   }
 }
-
