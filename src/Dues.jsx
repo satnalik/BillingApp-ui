@@ -189,14 +189,30 @@ export default function Dues() {
                     <td className="p-4 text-slate-700">
                       {toHumanDateTime(getBillTimestamp(b))}
                     </td>
-                    <td className="p-4 text-slate-800">{b.customerName || "-"}</td>
+                    <td className="p-4">
+                      <span
+                        className={`inline-flex rounded-lg px-2.5 py-1 font-semibold ${
+                          Number(b.dueAmount ?? 0) > 0
+                            ? "bg-rose-50 text-rose-700"
+                            : "text-slate-800"
+                        }`}
+                      >
+                        {b.customerName || "-"}
+                      </span>
+                    </td>
                     <td className="p-4 text-slate-700">
                       {b.contactInfo ?? b.contactNumber ?? b.phoneNumber ?? "-"}
                     </td>
                     <td className="p-4 text-slate-700">
                       {b.salesmanName ?? b.salesMan?.name ?? "-"}
                     </td>
-                    <td className="p-4 text-right font-semibold text-rose-700">
+                    <td
+                      className={`p-4 text-right font-semibold ${
+                        Number(b.dueAmount ?? 0) > 0
+                          ? "text-rose-700"
+                          : "text-slate-800"
+                      }`}
+                    >
                       {formatMoney(b.dueAmount)}
                     </td>
                     <td className="p-4 text-right">

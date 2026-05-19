@@ -14,6 +14,8 @@ import AddUser from "./AddUser";
 import SettingsLayout from "./SettingsLayout";
 import Suppliers from "./Suppliers";
 import { PurchaseDetail, PurchaseForm, PurchaseList } from "./Purchases";
+import PlaceholderPage from "./PlaceholderPage";
+import Dashboard from "./Dashboard";
 
 function App() {
   console.log("App component is rendering with Routes...");
@@ -24,10 +26,15 @@ function App() {
         <Routes>
           <Route path="/" element={<Login />} />
           <Route element={<BillingLayout />}>
+            <Route
+              path="/dashboard"
+              element={<Dashboard />}
+            />
             <Route path="/bill/new" element={<NewBill />} />
             <Route path="/bill/get" element={<GetBill />} />
             <Route path="/bill/history" element={<BillHistory />} />
             <Route path="/bill/dues" element={<Dues />} />
+            <Route path="/customers" element={<Dues />} />
             <Route path="/new-bill" element={<Navigate to="/bill/new" replace />} />
             <Route path="/get-bill" element={<Navigate to="/bill/get" replace />} />
             <Route path="/masters" element={<Navigate to="/masters/products" replace />} />
@@ -37,6 +44,24 @@ function App() {
             <Route path="/purchases/new" element={<PurchaseForm />} />
             <Route path="/purchases/:id" element={<PurchaseDetail />} />
             <Route path="/reports" element={<Reports />} />
+            <Route
+              path="/barcode-labels"
+              element={
+                <PlaceholderPage
+                  title="Barcode Labels"
+                  description="Filter by supplier, purchase bill, product, and date range to preview, print, or download barcode label PDFs."
+                />
+              }
+            />
+            <Route
+              path="/accounts"
+              element={
+                <PlaceholderPage
+                  title="Accounts"
+                  description="GST dashboard, sales GST, purchase GST, payments and dues, returns, exports, and tax settings will be grouped here."
+                />
+              }
+            />
 
             <Route path="/settings" element={<SettingsLayout />}>
               <Route index element={<Navigate to="/settings/gst" replace />} />

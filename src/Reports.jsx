@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import api from "./api";
+import { useNavigate } from "react-router-dom";
 
 function toYmd(date) {
   const pad = (n) => String(n).padStart(2, "0");
@@ -89,6 +90,446 @@ function KpiCard({ title, value, sub, tone }) {
       </div>
       <div className="mt-2 text-2xl font-black">{value}</div>
       {sub ? <div className="mt-1 text-sm opacity-80">{sub}</div> : null}
+    </div>
+  );
+}
+
+function toHumanDateTime(value) {
+  if (value === null || value === undefined || value === "") return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  });
+}
+
+function BillRegisterReport() {
+  const navigate = useNavigate();
+  const [filters, setFilters] = useState(() => {
+    const now = new Date();
+    const start = new Date();
+    start.setDate(now.getDate() - 6);
+    return {
+      from: toYmd(start),
+      to: toYmd(now),
+      billNo: "",
+      customer: "",
+      phone: "",
+      salesmanId: "",
+      paymentMethod: "",
+      dueOnly: false,
+      page: 0,
+      size: 25,
+    };
+  });
+  const [data, setData] = useState(null);
+  const [summary, setSummary] = useState(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [pdfLoadingId, setPdfLoadingId] = useState("");
+
+  const buildParams = (includePagination = true) => {
+    const params = {};
+    const keys = [
+      "from",
+      "to",
+      "billNo",
+      "customer",
+      "phone",
+      "salesmanId",
+      "paymentMethod",
+    ];
+
+    keys.forEach((key) => {
+      const value = String(filters[key] ?? "").trim();
+      if (value) params[key] = value;
+    });
+
+    if (filters.dueOnly) params.dueOnly = true;
+    if (includePagination) {
+      params.page = filters.page;
+      params.size = Math.min(100, Math.max(1, Number(filters.size) || 25));
+    }
+
+    return params;
+  };
+
+  const loadRegister = async () => {
+    setIsLoading(true);
+    setError("");
+
+    try {
+      const [listResponse, summaryResponse] = await Promise.all([
+        api.get("/bills/register", { params: buildParams(true) }),
+        api.get("/bills/register/summary", { params: buildParams(false) }),
+      ]);
+      setData(listResponse.data || null);
+      setSummary(summaryResponse.data || null);
+    } catch (err) {
+      console.error("Bill register load failed:", err);
+      setData(null);
+      setSummary(null);
+      setError(err.response?.data?.message || "Failed to load bill register.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      loadRegister();
+    }, 0);
+
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filters.page, filters.size]);
+
+  const setFilter = (field, value) => {
+    setFilters((prev) => ({ ...prev, [field]: value, page: 0 }));
+  };
+
+  const handleApply = () => {
+    setFilters((prev) => ({ ...prev, page: 0 }));
+    setTimeout(loadRegister, 0);
+  };
+
+  const handleOpenPdf = async (billId) => {
+    if (!billId || pdfLoadingId) return;
+    setPdfLoadingId(String(billId));
+
+    try {
+      const response = await api.get(`/bills/${billId}/pdf`, {
+        responseType: "blob",
+      });
+      const blob = new Blob([response.data], { type: "application/pdf" });
+      const objectUrl = URL.createObjectURL(blob);
+      const opened = window.open(objectUrl, "_blank", "noopener,noreferrer");
+      if (!opened) {
+        const a = document.createElement("a");
+        a.href = objectUrl;
+        a.download = `invoice_${billId}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+    } catch (err) {
+      console.error("Bill PDF open failed:", err);
+      alert(err.response?.data?.message || "Failed to open bill PDF.");
+    } finally {
+      setPdfLoadingId("");
+    }
+  };
+
+  const rows = Array.isArray(data?.items) ? data.items : [];
+  const paymentSplit = summary?.paymentSplit || {};
+  const totalPages = Number(data?.totalPages ?? 0);
+  const page = Number(data?.page ?? filters.page);
+
+  return (
+    <div className="w-full p-6">
+      <section className="p-0">
+        <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+          <div>
+            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-600">
+              Reports
+            </p>
+            <h2 className="mt-2 text-2xl font-black text-slate-900">
+              Bill Register
+            </h2>
+            <p className="mt-2 text-sm leading-6 text-slate-500">
+              Search bill-wise sales, payments, dues, and customer details.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={loadRegister}
+            disabled={isLoading}
+            className="rounded-xl border border-slate-300 px-5 py-3 text-sm font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-60"
+          >
+            {isLoading ? "Loading..." : "Refresh"}
+          </button>
+        </div>
+
+        <div className="mt-6 rounded-xl border border-slate-200 bg-slate-50 p-4">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+            <div>
+              <label className="mb-2 block text-sm font-bold text-slate-600">
+                From
+              </label>
+              <input
+                type="date"
+                className="w-full rounded-xl border-2 border-slate-200 bg-white p-3 outline-none focus:border-blue-500"
+                value={filters.from}
+                onChange={(e) => setFilter("from", e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="mb-2 block text-sm font-bold text-slate-600">
+                To
+              </label>
+              <input
+                type="date"
+                className="w-full rounded-xl border-2 border-slate-200 bg-white p-3 outline-none focus:border-blue-500"
+                value={filters.to}
+                onChange={(e) => setFilter("to", e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="mb-2 block text-sm font-bold text-slate-600">
+                Bill No
+              </label>
+              <input
+                type="text"
+                placeholder="INV-00000012 or 12"
+                className="w-full rounded-xl border-2 border-slate-200 bg-white p-3 outline-none focus:border-blue-500"
+                value={filters.billNo}
+                onChange={(e) => setFilter("billNo", e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="mb-2 block text-sm font-bold text-slate-600">
+                Customer
+              </label>
+              <input
+                type="text"
+                className="w-full rounded-xl border-2 border-slate-200 bg-white p-3 outline-none focus:border-blue-500"
+                value={filters.customer}
+                onChange={(e) => setFilter("customer", e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="mb-2 block text-sm font-bold text-slate-600">
+                Phone
+              </label>
+              <input
+                type="text"
+                className="w-full rounded-xl border-2 border-slate-200 bg-white p-3 outline-none focus:border-blue-500"
+                value={filters.phone}
+                onChange={(e) => setFilter("phone", e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="mb-2 block text-sm font-bold text-slate-600">
+                Salesman ID
+              </label>
+              <input
+                type="text"
+                className="w-full rounded-xl border-2 border-slate-200 bg-white p-3 outline-none focus:border-blue-500"
+                value={filters.salesmanId}
+                onChange={(e) => setFilter("salesmanId", e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="mb-2 block text-sm font-bold text-slate-600">
+                Payment
+              </label>
+              <select
+                className="w-full rounded-xl border-2 border-slate-200 bg-white p-3 outline-none focus:border-blue-500"
+                value={filters.paymentMethod}
+                onChange={(e) => setFilter("paymentMethod", e.target.value)}
+              >
+                <option value="">All</option>
+                <option value="CASH">Cash</option>
+                <option value="UPI">UPI</option>
+                <option value="CARD">Card</option>
+                <option value="CREDIT">Credit</option>
+              </select>
+            </div>
+            <label className="flex items-center gap-3 self-end rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold text-slate-700">
+              <input
+                type="checkbox"
+                checked={filters.dueOnly}
+                onChange={(e) => setFilter("dueOnly", e.target.checked)}
+              />
+              Due only
+            </label>
+          </div>
+
+          <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:justify-end">
+            <select
+              className="rounded-xl border-2 border-slate-200 bg-white p-3 text-sm font-bold outline-none focus:border-blue-500"
+              value={filters.size}
+              onChange={(e) => setFilter("size", e.target.value)}
+            >
+              <option value="25">25 rows</option>
+              <option value="50">50 rows</option>
+              <option value="100">100 rows</option>
+            </select>
+            <button
+              type="button"
+              onClick={handleApply}
+              disabled={isLoading}
+              className="rounded-xl bg-blue-600 px-5 py-3 text-sm font-bold text-white hover:bg-blue-700 disabled:opacity-60"
+            >
+              Apply Filters
+            </button>
+          </div>
+        </div>
+
+        {error && (
+          <div className="mt-5 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-semibold text-rose-700">
+            {error}
+          </div>
+        )}
+
+        <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-4">
+          <KpiCard
+            title="Total Bills"
+            value={String(summary?.totalBills ?? 0)}
+            sub={`${data?.totalElements ?? 0} matching rows`}
+            tone="blue"
+          />
+          <KpiCard
+            title="Total Sales"
+            value={`Rs ${formatMoney(summary?.totalSales)}`}
+            sub="Filtered range"
+            tone="green"
+          />
+          <KpiCard
+            title="Total Paid"
+            value={`Rs ${formatMoney(summary?.totalPaid)}`}
+            sub={`Cash ${formatMoney(paymentSplit.CASH)} / UPI ${formatMoney(paymentSplit.UPI)}`}
+            tone="slate"
+          />
+          <KpiCard
+            title="Total Due"
+            value={`Rs ${formatMoney(summary?.totalDue)}`}
+            sub={`Credit ${formatMoney(paymentSplit.CREDIT)}`}
+            tone="purple"
+          />
+        </div>
+
+        <div className="mt-6 overflow-x-auto rounded-xl border border-slate-200 bg-white">
+          <table className="w-full min-w-[1120px] text-left">
+            <thead className="bg-slate-100">
+              <tr>
+                <th className="p-4 text-sm font-bold text-slate-600">Bill</th>
+                <th className="p-4 text-sm font-bold text-slate-600">Time</th>
+                <th className="p-4 text-sm font-bold text-slate-600">Customer</th>
+                <th className="p-4 text-sm font-bold text-slate-600">Phone</th>
+                <th className="p-4 text-sm font-bold text-slate-600">Salesman</th>
+                <th className="p-4 text-right text-sm font-bold text-slate-600">Items</th>
+                <th className="p-4 text-right text-sm font-bold text-slate-600">Total</th>
+                <th className="p-4 text-right text-sm font-bold text-slate-600">Paid</th>
+                <th className="p-4 text-right text-sm font-bold text-slate-600">Due</th>
+                <th className="p-4 text-sm font-bold text-slate-600">Methods</th>
+                <th className="p-4 text-right text-sm font-bold text-slate-600">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {isLoading ? (
+                <tr>
+                  <td colSpan="11" className="p-6 text-sm text-slate-500">
+                    Loading bill register...
+                  </td>
+                </tr>
+              ) : rows.length > 0 ? (
+                rows.map((row) => (
+                  <tr key={row.id} className="border-t border-slate-100">
+                    <td className="p-4 font-semibold text-slate-800">
+                      {row.billNumber || row.id}
+                    </td>
+                    <td className="p-4 text-slate-700">
+                      {toHumanDateTime(row.createdAt)}
+                    </td>
+                    <td className="p-4 text-slate-800">{row.customerName || "-"}</td>
+                    <td className="p-4 text-slate-700">{row.contactInfo || "-"}</td>
+                    <td className="p-4 text-slate-700">
+                      {row.salesmanName || row.salesmanEmployeeId || "-"}
+                    </td>
+                    <td className="p-4 text-right text-slate-700">
+                      {row.itemsCount ?? 0}
+                    </td>
+                    <td className="p-4 text-right text-slate-800">
+                      {formatMoney(row.totalAmount)}
+                    </td>
+                    <td className="p-4 text-right text-slate-700">
+                      {formatMoney(row.paidAmount)}
+                    </td>
+                    <td className="p-4 text-right font-semibold text-rose-700">
+                      {formatMoney(row.dueAmount)}
+                    </td>
+                    <td className="p-4 text-slate-700">
+                      {asArray(row.paymentMethods).join(", ") || "-"}
+                    </td>
+                    <td className="p-4">
+                      <div className="flex justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            navigate(`/bill/get?billId=${encodeURIComponent(row.id)}`)
+                          }
+                          className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-bold text-white hover:bg-blue-700"
+                        >
+                          View
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleOpenPdf(row.id)}
+                          disabled={pdfLoadingId === String(row.id)}
+                          className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-60"
+                        >
+                          PDF
+                        </button>
+                        {Number(row.dueAmount ?? 0) > 0 && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              navigate(`/bill/get?billId=${encodeURIComponent(row.id)}`)
+                            }
+                            className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700 hover:bg-amber-100"
+                          >
+                            Collect
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan="11" className="p-6 text-sm text-slate-500">
+                    No bills found for the selected filters.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="text-sm font-semibold text-slate-500">
+            Page {page + 1} of {Math.max(1, totalPages)} /{" "}
+            {data?.totalElements ?? 0} bills
+          </div>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              disabled={page <= 0 || isLoading}
+              onClick={() =>
+                setFilters((prev) => ({ ...prev, page: Math.max(0, page - 1) }))
+              }
+              className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              disabled={page >= totalPages - 1 || isLoading || totalPages <= 1}
+              onClick={() => setFilters((prev) => ({ ...prev, page: page + 1 }))}
+              className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }
@@ -551,7 +992,7 @@ function DayEndClosingReport() {
 }
 
 export default function Reports() {
-  const [activeKey, setActiveKey] = useState("day_end");
+  const [activeKey, setActiveKey] = useState("bill_register");
 
   const items = [
     {
@@ -565,10 +1006,9 @@ export default function Reports() {
       description: "KPIs, top products, salesman performance",
     },
     {
-      key: "sales_register",
-      label: "Sales Register",
-      description: "Bill-wise listing (coming soon)",
-      disabled: true,
+      key: "bill_register",
+      label: "Bill Register",
+      description: "Bill-wise sales, payments and dues",
     },
     {
       key: "product_sales",
@@ -591,6 +1031,7 @@ export default function Reports() {
   ];
 
   const content = (() => {
+    if (activeKey === "bill_register") return <BillRegisterReport />;
     if (activeKey === "sales_summary") return <SalesSummaryReport />;
     if (activeKey === "day_end") return <DayEndClosingReport />;
     return null;

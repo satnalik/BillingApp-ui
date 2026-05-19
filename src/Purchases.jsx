@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import api from "./api";
 import { fetchSuppliers, formatSupplierOption } from "./supplierApi";
 
@@ -17,11 +17,31 @@ const initialForm = {
   notes: "",
 };
 
+const initialSupplierPaymentForm = {
+  amount: "",
+  method: "CASH",
+  reference: "",
+};
+
 const emptyItem = {
   productId: "",
+  barcodeScan: "",
+  barcodeMessage: "",
   quantity: "",
   purchasePrice: "",
   sellingPrice: "",
+};
+
+const initialNewProductForm = {
+  barcode: "",
+  name: "",
+  itemType: "PACKAGE",
+  category: "",
+  costPrice: "",
+  sellingPrice: "",
+  mrp: "",
+  quantity: "",
+  targetRowIndex: null,
 };
 
 function money(value) {
@@ -79,6 +99,12 @@ function fieldAmount(value) {
   return String(value);
 }
 
+function labelCountValue(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount < 0) return 0;
+  return Math.floor(amount);
+}
+
 function productLabel(product) {
   const name = String(product?.name || "").trim();
   const barcode = String(product?.barcode || "").trim();
@@ -86,14 +112,14 @@ function productLabel(product) {
   return name || barcode || `Product #${product?.id}`;
 }
 
-async function fetchProducts() {
-  try {
-    const response = await api.get("/products");
-    return Array.isArray(response.data) ? response.data : [];
-  } catch {
-    const response = await api.get("/products/all");
-    return Array.isArray(response.data) ? response.data : [];
-  }
+async function fetchProducts(supplierId, searchText = "") {
+  const params = { supplierId };
+  const query = searchText.trim();
+  const path = query ? "/products/search" : "/products";
+  if (query) params.name = query;
+
+  const response = await api.get(path, { params });
+  return Array.isArray(response.data) ? response.data : [];
 }
 
 export function PurchaseList() {
@@ -213,8 +239,16 @@ export function PurchaseList() {
               ) : filteredPurchases.length > 0 ? (
                 filteredPurchases.map((purchase) => (
                   <tr key={purchase.id} className="border-t border-slate-100">
-                    <td className="p-4 font-semibold text-slate-800">
-                      {purchase.billNumber || "-"}
+                    <td className="p-4">
+                      <span
+                        className={`inline-flex rounded-lg px-2.5 py-1 font-semibold ${
+                          numberOrZero(purchase.dueAmount) > 0
+                            ? "bg-rose-50 text-rose-700"
+                            : "text-slate-800"
+                        }`}
+                      >
+                        {purchase.billNumber || "-"}
+                      </span>
                     </td>
                     <td className="p-4 text-slate-700">
                       {purchase.supplierName || "-"}
@@ -231,7 +265,13 @@ export function PurchaseList() {
                     <td className="p-4 text-right text-slate-700">
                       {money(purchase.paidAmount)}
                     </td>
-                    <td className="p-4 text-right font-semibold text-slate-800">
+                    <td
+                      className={`p-4 text-right font-semibold ${
+                        numberOrZero(purchase.dueAmount) > 0
+                          ? "text-rose-700"
+                          : "text-slate-800"
+                      }`}
+                    >
                       {money(purchase.dueAmount)}
                     </td>
                     <td className="p-4 text-right">
@@ -266,6 +306,11 @@ export function PurchaseForm() {
   const [suppliers, setSuppliers] = useState([]);
   const [products, setProducts] = useState([]);
   const [isLoadingOptions, setIsLoadingOptions] = useState(true);
+  const [isProductsLoading, setIsProductsLoading] = useState(false);
+  const [productSearchQuery, setProductSearchQuery] = useState("");
+  const [isProductModalOpen, setIsProductModalOpen] = useState(false);
+  const [newProductForm, setNewProductForm] = useState(initialNewProductForm);
+  const [isProductSaving, setIsProductSaving] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
@@ -273,16 +318,11 @@ export function PurchaseForm() {
       setIsLoadingOptions(true);
 
       try {
-        const [supplierData, productData] = await Promise.all([
-          fetchSuppliers(),
-          fetchProducts(),
-        ]);
+        const supplierData = await fetchSuppliers();
         setSuppliers(supplierData);
-        setProducts(productData);
       } catch (error) {
         console.error("Failed to load purchase options:", error);
         setSuppliers([]);
-        setProducts([]);
         alert(error.response?.data?.message || "Failed to load purchase data");
       } finally {
         setIsLoadingOptions(false);
@@ -291,6 +331,34 @@ export function PurchaseForm() {
 
     return () => clearTimeout(timer);
   }, []);
+
+  useEffect(() => {
+    const supplierId = Number(form.supplierId);
+    if (!Number.isFinite(supplierId) || supplierId <= 0) {
+      setProducts([]);
+      return undefined;
+    }
+
+    const timer = setTimeout(async () => {
+      setIsProductsLoading(true);
+
+      try {
+        const productData = await fetchProducts(
+          supplierId,
+          productSearchQuery,
+        );
+        setProducts(productData);
+      } catch (error) {
+        console.error("Failed to load supplier products:", error);
+        setProducts([]);
+        alert(error.response?.data?.message || "Failed to load supplier products");
+      } finally {
+        setIsProductsLoading(false);
+      }
+    }, productSearchQuery.trim() ? 250 : 0);
+
+    return () => clearTimeout(timer);
+  }, [form.supplierId, productSearchQuery]);
 
   const productOptions = useMemo(
     () =>
@@ -349,6 +417,12 @@ export function PurchaseForm() {
     setForm((prev) => ({ ...prev, [field]: value }));
   };
 
+  const handleSupplierChange = (value) => {
+    setForm((prev) => ({ ...prev, supplierId: value }));
+    setProductSearchQuery("");
+    setItems([{ ...emptyItem }]);
+  };
+
   const handleItemChange = (index, field, value) => {
     setItems((prev) =>
       prev.map((item, itemIndex) =>
@@ -362,24 +436,92 @@ export function PurchaseForm() {
       (product) => String(product.id) === String(productId),
     );
 
+    applyProductToItem(index, selectedProduct || { id: productId });
+  };
+
+  const applyProductToItem = (index, product) => {
     setItems((prev) =>
       prev.map((item, itemIndex) => {
         if (itemIndex !== index) return item;
 
         return {
           ...item,
-          productId,
+          productId: String(product?.id || ""),
+          barcodeScan: String(product?.barcode || item.barcodeScan || ""),
+          barcodeMessage: "",
           purchasePrice:
             item.purchasePrice ||
             fieldAmount(
-              selectedProduct?.costPrice ?? selectedProduct?.landingPrice,
+              product?.costPrice ?? product?.landingPrice,
             ),
           sellingPrice:
             item.sellingPrice ||
-            fieldAmount(selectedProduct?.sellingPrice ?? selectedProduct?.price),
+            fieldAmount(product?.sellingPrice ?? product?.price),
         };
       }),
     );
+  };
+
+  const openNewProductModal = ({ barcode = "", rowIndex = null } = {}) => {
+    const row = Number.isInteger(rowIndex) ? items[rowIndex] : null;
+
+    setNewProductForm({
+      ...initialNewProductForm,
+      barcode,
+      quantity: row?.quantity || "",
+      targetRowIndex: rowIndex,
+    });
+    setIsProductModalOpen(true);
+  };
+
+  const handleBarcodeLookup = async (index) => {
+    const barcode = String(items[index]?.barcodeScan || "").trim();
+    const supplierId = Number(form.supplierId);
+    if (!barcode || !Number.isFinite(supplierId) || supplierId <= 0) return;
+
+    handleItemChange(index, "barcodeMessage", "Searching barcode...");
+
+    try {
+      const response = await api.get(
+        `/products/barcode/${encodeURIComponent(barcode)}`,
+        { params: { supplierId } },
+      );
+      const product = response.data;
+      const productSupplierId = Number(
+        product?.supplier?.id ?? product?.supplierId ?? "",
+      );
+
+      if (
+        Number.isFinite(productSupplierId) &&
+        productSupplierId > 0 &&
+        productSupplierId !== supplierId
+      ) {
+        throw new Error("Product belongs to another supplier.");
+      }
+
+      if (!product?.id) throw new Error("Product not found.");
+
+      setProducts((prev) => {
+        if (prev.some((item) => String(item.id) === String(product.id))) {
+          return prev;
+        }
+        return [...prev, product];
+      });
+      applyProductToItem(index, product);
+    } catch (error) {
+      console.error("Barcode lookup failed:", error);
+      setItems((prev) =>
+        prev.map((item, itemIndex) =>
+          itemIndex === index
+            ? {
+                ...item,
+                productId: "",
+                barcodeMessage: "Product not found. Add new product?",
+              }
+            : item,
+        ),
+      );
+    }
   };
 
   const addItem = () => {
@@ -390,6 +532,110 @@ export function PurchaseForm() {
     setItems((prev) =>
       prev.length === 1 ? prev : prev.filter((_, itemIndex) => itemIndex !== index),
     );
+  };
+
+  const handleNewProductChange = (field, value) => {
+    setNewProductForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const closeProductModal = () => {
+    if (isProductSaving) return;
+    setIsProductModalOpen(false);
+    setNewProductForm(initialNewProductForm);
+  };
+
+  const handleCreateProduct = async (event) => {
+    event.preventDefault();
+    if (isProductSaving) return;
+
+    const supplierId = Number(form.supplierId);
+    const barcode = newProductForm.barcode.trim();
+    const name = newProductForm.name.trim();
+    const itemType = String(newProductForm.itemType || "PACKAGE").toUpperCase();
+    const sellingPrice = Number(newProductForm.sellingPrice);
+    const quantity = Number(newProductForm.quantity);
+
+    if (
+      !name ||
+      !Number.isFinite(supplierId) ||
+      supplierId <= 0 ||
+      !Number.isFinite(sellingPrice) ||
+      !Number.isFinite(quantity) ||
+      quantity <= 0
+    ) {
+      return;
+    }
+
+    setIsProductSaving(true);
+
+    try {
+      const payload = {
+        name,
+        itemType,
+        supplier: { id: supplierId },
+        category: newProductForm.category.trim() || null,
+        stockQuantity: 0,
+        costPrice:
+          newProductForm.costPrice === ""
+            ? null
+            : Number(newProductForm.costPrice),
+        sellingPrice,
+        price: sellingPrice,
+        mrp: newProductForm.mrp === "" ? null : Number(newProductForm.mrp),
+      };
+
+      if (barcode) payload.barcode = barcode;
+
+      const response = await api.post("/products", payload);
+      const createdProduct = response.data;
+      const nextProducts = await fetchProducts(supplierId, productSearchQuery);
+      setProducts(nextProducts);
+
+      if (createdProduct?.id) {
+        setItems((prev) => {
+          const explicitTargetIndex = Number(newProductForm.targetRowIndex);
+          const targetIndex =
+            Number.isInteger(explicitTargetIndex) &&
+            explicitTargetIndex >= 0 &&
+            explicitTargetIndex < prev.length
+              ? explicitTargetIndex
+              : prev.findLastIndex((item) => !item.productId);
+          const nextItem = {
+            ...emptyItem,
+            productId: String(createdProduct.id),
+            barcodeScan: barcode,
+            barcodeMessage: "",
+            quantity: fieldAmount(quantity),
+            purchasePrice: fieldAmount(payload.costPrice),
+            sellingPrice: fieldAmount(sellingPrice),
+          };
+
+          if (targetIndex === -1) return [...prev, nextItem];
+
+          return prev.map((item, index) =>
+            index === targetIndex
+              ? {
+                  ...item,
+                  productId: String(createdProduct.id),
+                  barcodeScan: barcode || item.barcodeScan,
+                  barcodeMessage: "",
+                  quantity: item.quantity || fieldAmount(quantity),
+                  purchasePrice: item.purchasePrice || fieldAmount(payload.costPrice),
+                  sellingPrice: item.sellingPrice || fieldAmount(sellingPrice),
+                }
+              : item,
+          );
+        });
+      }
+
+      setIsProductModalOpen(false);
+      setNewProductForm(initialNewProductForm);
+    } catch (error) {
+      console.error("Failed to create product:", error);
+      alert(error.response?.data?.message || "Failed to create product");
+    } finally {
+      setIsProductSaving(false);
+    }
   };
 
   const handleSubmit = async (event) => {
@@ -422,7 +668,9 @@ export function PurchaseForm() {
       if (form.billDate) payload.billDate = form.billDate;
 
       const response = await api.post("/purchases", payload);
-      navigate(`/purchases/${response.data.id}`);
+      navigate(`/purchases/${response.data.id}`, {
+        state: { generateBarcodes: true },
+      });
     } catch (error) {
       console.error("Failed to save purchase:", error);
       alert(error.response?.data?.message || "Failed to save purchase");
@@ -465,7 +713,7 @@ export function PurchaseForm() {
                   className="w-full rounded-xl border-2 border-slate-200 bg-white p-3 outline-none focus:border-blue-500"
                   value={form.supplierId}
                   onChange={(e) =>
-                    handleFormChange("supplierId", e.target.value)
+                    handleSupplierChange(e.target.value)
                   }
                   disabled={isLoadingOptions}
                 >
@@ -517,17 +765,44 @@ export function PurchaseForm() {
                   {items.length} row{items.length === 1 ? "" : "s"}
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={addItem}
-                className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm font-bold text-blue-700 hover:bg-blue-100"
-              >
-                + Add Item
-              </button>
+              <div className="flex flex-col gap-3 md:flex-row md:items-end">
+                <div className="w-full md:w-72">
+                  <label className="mb-2 block text-sm font-bold text-slate-600">
+                    Product Search
+                  </label>
+                  <input
+                    type="text"
+                    placeholder={
+                      form.supplierId ? "Search supplier products" : "Select supplier first"
+                    }
+                    className="w-full rounded-xl border-2 border-slate-200 p-3 outline-none focus:border-blue-500 disabled:bg-slate-100"
+                    value={productSearchQuery}
+                    onChange={(event) =>
+                      setProductSearchQuery(event.target.value)
+                    }
+                    disabled={!form.supplierId}
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => openNewProductModal()}
+                  disabled={!form.supplierId}
+                  className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-700 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400"
+                >
+                  Add New Product
+                </button>
+                <button
+                  type="button"
+                  onClick={addItem}
+                  className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm font-bold text-blue-700 hover:bg-blue-100"
+                >
+                  + Add Item
+                </button>
+              </div>
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1040px] text-left">
+              <table className="w-full min-w-[1180px] text-left">
                 <thead className="bg-slate-100">
                   <tr>
                     <th className="w-14 p-4 text-sm font-bold text-slate-600">
@@ -565,25 +840,97 @@ export function PurchaseForm() {
                           {index + 1}
                         </td>
                         <td className="p-4 align-top">
-                          <select
-                            className="w-full rounded-xl border-2 border-slate-200 bg-white p-3 outline-none focus:border-blue-500"
-                            value={item.productId}
-                            onChange={(e) =>
-                              handleProductChange(index, e.target.value)
-                            }
-                            disabled={isLoadingOptions}
-                          >
-                            <option value="">
-                              {isLoadingOptions
-                                ? "Loading products..."
-                                : "Select product"}
-                            </option>
-                            {productOptions.map((product) => (
-                              <option key={product.id} value={product.id}>
-                                {productLabel(product)}
-                              </option>
-                            ))}
-                          </select>
+                          <div className="overflow-hidden rounded-xl border-2 border-slate-200 bg-white focus-within:border-blue-500">
+                            <div className="flex items-center gap-2 px-3 py-2.5">
+                              <span className="w-16 shrink-0 text-xs font-black uppercase tracking-[0.12em] text-slate-400">
+                                Scan
+                              </span>
+                              <input
+                                type="text"
+                                placeholder={
+                                  form.supplierId
+                                    ? "Barcode"
+                                    : "Select supplier first"
+                                }
+                                className="min-w-0 flex-1 border-0 bg-transparent p-0 text-sm font-semibold text-slate-800 outline-none placeholder:text-slate-400 disabled:text-slate-400"
+                                value={item.barcodeScan}
+                                onChange={(event) =>
+                                  handleItemChange(
+                                    index,
+                                    "barcodeScan",
+                                    event.target.value,
+                                  )
+                                }
+                                onKeyDown={(event) => {
+                                  if (event.key !== "Enter") return;
+                                  event.preventDefault();
+                                  handleBarcodeLookup(index);
+                                }}
+                                disabled={!form.supplierId}
+                              />
+                              <button
+                                type="button"
+                                onClick={() => handleBarcodeLookup(index)}
+                                disabled={
+                                  !form.supplierId || !item.barcodeScan.trim()
+                                }
+                                className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-black text-slate-700 hover:bg-slate-200 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-300"
+                              >
+                                Find
+                              </button>
+                            </div>
+
+                            {item.barcodeMessage && (
+                              <div className="flex flex-wrap items-center gap-2 border-t border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800">
+                                <span>{item.barcodeMessage}</span>
+                                {item.barcodeMessage.includes("Add new") && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      openNewProductModal({
+                                        barcode: item.barcodeScan.trim(),
+                                        rowIndex: index,
+                                      })
+                                    }
+                                    className="rounded-lg bg-amber-600 px-3 py-1.5 text-white hover:bg-amber-700"
+                                  >
+                                    Add Product
+                                  </button>
+                                )}
+                              </div>
+                            )}
+
+                            <div className="flex items-center gap-2 border-t border-slate-200 px-3 py-2.5">
+                              <span className="w-16 shrink-0 text-xs font-black uppercase tracking-[0.12em] text-slate-400">
+                                Product
+                              </span>
+                              <select
+                                className="min-w-0 flex-1 border-0 bg-transparent p-0 text-sm font-semibold text-slate-800 outline-none disabled:text-slate-400"
+                                value={item.productId}
+                                onChange={(e) =>
+                                  handleProductChange(index, e.target.value)
+                                }
+                                disabled={
+                                  isLoadingOptions ||
+                                  isProductsLoading ||
+                                  !form.supplierId
+                                }
+                              >
+                                <option value="">
+                                  {!form.supplierId
+                                    ? "Select supplier first"
+                                    : isProductsLoading
+                                      ? "Loading products..."
+                                      : "Select product"}
+                                </option>
+                                {productOptions.map((product) => (
+                                  <option key={product.id} value={product.id}>
+                                    {productLabel(product)}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          </div>
                         </td>
                         <td className="p-4 align-top">
                           <input
@@ -797,7 +1144,11 @@ export function PurchaseForm() {
                     <span className="text-sm font-black text-slate-700">
                       Due
                     </span>
-                    <span className="text-2xl font-black text-blue-700">
+                    <span
+                      className={`text-2xl font-black ${
+                        totals.dueAmount > 0 ? "text-rose-700" : "text-blue-700"
+                      }`}
+                    >
                       {money(totals.dueAmount)}
                     </span>
                   </div>
@@ -822,6 +1173,182 @@ export function PurchaseForm() {
             </button>
           </div>
         </form>
+
+        {isProductModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">
+            <div className="w-full max-w-3xl rounded-2xl border border-slate-200 bg-white p-6 shadow-xl">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-600">
+                    Supplier Product
+                  </p>
+                  <h3 className="mt-2 text-2xl font-black text-slate-900">
+                    Add New Product
+                  </h3>
+                  <p className="mt-2 text-sm font-semibold text-slate-500">
+                    Barcode is optional. Missing barcodes are generated after
+                    the purchase bill is saved.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={closeProductModal}
+                  className="text-sm font-semibold text-slate-400 hover:text-slate-600"
+                >
+                  Close
+                </button>
+              </div>
+
+              <form onSubmit={handleCreateProduct} className="mt-6 space-y-5">
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                  <div>
+                    <label className="mb-2 block text-sm font-bold text-slate-600">
+                      Barcode / Scan Barcode
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full rounded-xl border-2 border-slate-200 p-3 outline-none focus:border-blue-500"
+                      value={newProductForm.barcode}
+                      onChange={(event) =>
+                        handleNewProductChange("barcode", event.target.value)
+                      }
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-2 block text-sm font-bold text-slate-600">
+                      Name
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full rounded-xl border-2 border-slate-200 p-3 outline-none focus:border-blue-500"
+                      value={newProductForm.name}
+                      onChange={(event) =>
+                        handleNewProductChange("name", event.target.value)
+                      }
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-2 block text-sm font-bold text-slate-600">
+                      Category
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full rounded-xl border-2 border-slate-200 p-3 outline-none focus:border-blue-500"
+                      value={newProductForm.category}
+                      onChange={(event) =>
+                        handleNewProductChange("category", event.target.value)
+                      }
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-2 block text-sm font-bold text-slate-600">
+                      Item Type
+                    </label>
+                    <select
+                      className="w-full rounded-xl border-2 border-slate-200 bg-white p-3 outline-none focus:border-blue-500"
+                      value={newProductForm.itemType}
+                      onChange={(event) =>
+                        handleNewProductChange("itemType", event.target.value)
+                      }
+                    >
+                      <option value="PACKAGE">PACKAGE</option>
+                      <option value="LOOSE">LOOSE</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="mb-2 block text-sm font-bold text-slate-600">
+                      Purchase Quantity
+                    </label>
+                    <input
+                      type="number"
+                      min="0.01"
+                      step="0.01"
+                      className="w-full rounded-xl border-2 border-slate-200 p-3 outline-none focus:border-blue-500"
+                      value={newProductForm.quantity}
+                      onChange={(event) =>
+                        handleNewProductChange(
+                          "quantity",
+                          event.target.value,
+                        )
+                      }
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-2 block text-sm font-bold text-slate-600">
+                      Cost Price
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      className="w-full rounded-xl border-2 border-slate-200 p-3 outline-none focus:border-blue-500"
+                      value={newProductForm.costPrice}
+                      onChange={(event) =>
+                        handleNewProductChange("costPrice", event.target.value)
+                      }
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-2 block text-sm font-bold text-slate-600">
+                      Selling Price
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      className="w-full rounded-xl border-2 border-slate-200 p-3 outline-none focus:border-blue-500"
+                      value={newProductForm.sellingPrice}
+                      onChange={(event) =>
+                        handleNewProductChange(
+                          "sellingPrice",
+                          event.target.value,
+                        )
+                      }
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-2 block text-sm font-bold text-slate-600">
+                      MRP
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      className="w-full rounded-xl border-2 border-slate-200 p-3 outline-none focus:border-blue-500"
+                      value={newProductForm.mrp}
+                      onChange={(event) =>
+                        handleNewProductChange("mrp", event.target.value)
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div className="flex flex-col-reverse gap-3 pt-2 sm:flex-row sm:justify-end">
+                  <button
+                    type="button"
+                    onClick={closeProductModal}
+                    className="rounded-xl border border-slate-300 px-4 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-100"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={
+                      isProductSaving ||
+                      !newProductForm.name.trim() ||
+                      !Number.isFinite(Number(newProductForm.sellingPrice)) ||
+                      !Number.isFinite(Number(newProductForm.quantity)) ||
+                      Number(newProductForm.quantity) <= 0
+                    }
+                    className="rounded-xl bg-blue-600 px-5 py-3 text-sm font-bold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500 disabled:hover:bg-slate-200"
+                  >
+                    {isProductSaving ? "SAVING..." : "Add Product"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
       </section>
     </div>
   );
@@ -829,11 +1356,24 @@ export function PurchaseForm() {
 
 export function PurchaseDetail() {
   const { id } = useParams();
+  const location = useLocation();
   const [purchase, setPurchase] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isCancelModalOpen, setIsCancelModalOpen] = useState(false);
   const [cancelReason, setCancelReason] = useState("");
   const [isCancelling, setIsCancelling] = useState(false);
+  const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
+  const [paymentForm, setPaymentForm] = useState(initialSupplierPaymentForm);
+  const [paymentError, setPaymentError] = useState("");
+  const [paymentToast, setPaymentToast] = useState("");
+  const [isRecordingPayment, setIsRecordingPayment] = useState(false);
+  const [labelData, setLabelData] = useState(null);
+  const [labelRows, setLabelRows] = useState([]);
+  const [isGeneratingLabels, setIsGeneratingLabels] = useState(false);
+  const [isPrintingLabels, setIsPrintingLabels] = useState(false);
+  const [labelError, setLabelError] = useState("");
+  const [showLabelPreview, setShowLabelPreview] = useState(false);
+  const [hasAutoGeneratedLabels, setHasAutoGeneratedLabels] = useState(false);
 
   useEffect(() => {
     const timer = setTimeout(async () => {
@@ -876,6 +1416,168 @@ export function PurchaseDetail() {
     }
   };
 
+  const handlePaymentFormChange = (field, value) => {
+    setPaymentForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const closePaymentModal = () => {
+    if (isRecordingPayment) return;
+    setIsPaymentModalOpen(false);
+    setPaymentForm(initialSupplierPaymentForm);
+    setPaymentError("");
+  };
+
+  const handleOpenPaymentModal = () => {
+    setPaymentForm((prev) => ({
+      ...prev,
+      amount:
+        prev.amount ||
+        (Number(purchase?.dueAmount) > 0 ? String(purchase.dueAmount) : ""),
+    }));
+    setPaymentError("");
+    setIsPaymentModalOpen(true);
+  };
+
+  const handleRecordPayment = async (event) => {
+    event.preventDefault();
+    if (isRecordingPayment) return;
+
+    const amount = Number(paymentForm.amount);
+    const dueAmount = Number(purchase?.dueAmount);
+    const method = String(paymentForm.method || "").trim().toUpperCase();
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setPaymentError("Enter a payment amount greater than zero.");
+      return;
+    }
+
+    if (Number.isFinite(dueAmount) && amount > dueAmount) {
+      setPaymentError("Payment amount cannot exceed current due amount.");
+      return;
+    }
+
+    if (!paymentMethods.includes(method)) {
+      setPaymentError("Choose CASH, UPI, or CARD.");
+      return;
+    }
+
+    setIsRecordingPayment(true);
+    setPaymentError("");
+    setPaymentToast("");
+
+    try {
+      const response = await api.post(`/purchases/${id}/payments`, {
+        method,
+        amount,
+        reference: paymentForm.reference.trim() || null,
+      });
+      setPurchase(response.data || null);
+      setPaymentToast("Supplier payment recorded.");
+      setIsPaymentModalOpen(false);
+      setPaymentForm(initialSupplierPaymentForm);
+    } catch (error) {
+      console.error("Failed to record supplier payment:", error);
+      setPaymentError(
+        error.response?.data?.message || "Failed to record supplier payment.",
+      );
+    } finally {
+      setIsRecordingPayment(false);
+    }
+  };
+
+  const handleGenerateBarcodes = async () => {
+    if (isGeneratingLabels) return;
+
+    setIsGeneratingLabels(true);
+    setLabelError("");
+
+    try {
+      const response = await api.post(
+        `/purchases/${id}/barcode-labels/generate`,
+      );
+      const data = response.data || {};
+      const nextRows = Array.isArray(data.items)
+        ? data.items.map((item, index) => ({
+            ...item,
+            rowKey: `${item.productId ?? "product"}-${item.barcode ?? index}`,
+            labelsToPrint: labelCountValue(
+              item.labelsToPrint ?? item.quantityReceived,
+            ),
+          }))
+        : [];
+
+      setLabelData(data);
+      setLabelRows(nextRows);
+      setShowLabelPreview(true);
+    } catch (error) {
+      console.error("Failed to generate barcode labels:", error);
+      setLabelError(
+        error.response?.data?.message ||
+          "Failed to generate barcode labels. Check that the supplier has a supplier code.",
+      );
+    } finally {
+      setIsGeneratingLabels(false);
+    }
+  };
+
+  const handleLabelCountChange = (rowKey, value) => {
+    setLabelRows((prev) =>
+      prev.map((row) =>
+        row.rowKey === rowKey
+          ? { ...row, labelsToPrint: labelCountValue(value) }
+          : row,
+      ),
+    );
+  };
+
+  const handlePrintLabels = async () => {
+    if (isPrintingLabels || labelRows.length === 0) return;
+
+    setIsPrintingLabels(true);
+    setLabelError("");
+
+    try {
+      const payload = {
+        items: labelRows.map((item) => ({
+          productId: Number(item.productId),
+          labelsToPrint: labelCountValue(item.labelsToPrint),
+        })),
+      };
+
+      const response = await api.post(
+        `/purchases/${id}/barcode-labels/pdf`,
+        payload,
+        {
+          headers: { "Content-Type": "application/json" },
+          responseType: "blob",
+        },
+      );
+
+      const blob = new Blob([response.data], { type: "application/pdf" });
+      const url = window.URL.createObjectURL(blob);
+      window.open(url, "_blank", "noopener,noreferrer");
+      window.setTimeout(() => window.URL.revokeObjectURL(url), 60_000);
+    } catch (error) {
+      console.error("Failed to print barcode labels:", error);
+      setLabelError(
+        error.response?.data?.message ||
+          "Failed to generate barcode label PDF.",
+      );
+    } finally {
+      setIsPrintingLabels(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!location.state?.generateBarcodes) return;
+    if (!purchase || hasAutoGeneratedLabels) return;
+    if (purchaseStatus(purchase) === "CANCELLED") return;
+
+    setHasAutoGeneratedLabels(true);
+    handleGenerateBarcodes();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasAutoGeneratedLabels, location.state, purchase]);
+
   if (isLoading) {
     return (
       <div className="min-h-screen w-full bg-slate-50 p-6">
@@ -898,6 +1600,18 @@ export function PurchaseDetail() {
 
   const status = purchaseStatus(purchase);
   const isActive = status === "ACTIVE";
+  const isCancelled = status === "CANCELLED";
+  const hasLabelRows = labelRows.length > 0;
+  const hasPaidAmount = numberOrZero(purchase.paidAmount) > 0;
+  const hasSupplierDue = isActive && numberOrZero(purchase.dueAmount) > 0;
+  const paymentAmount = Number(paymentForm.amount);
+  const canRecordPayment =
+    hasSupplierDue &&
+    Number.isFinite(paymentAmount) &&
+    paymentAmount > 0 &&
+    paymentAmount <= numberOrZero(purchase.dueAmount) &&
+    paymentMethods.includes(String(paymentForm.method).toUpperCase()) &&
+    !isRecordingPayment;
 
   return (
     <div className="min-h-screen w-full bg-slate-50 p-6">
@@ -916,11 +1630,62 @@ export function PurchaseDetail() {
             </p>
           </div>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            {hasSupplierDue && (
+              <button
+                type="button"
+                onClick={handleOpenPaymentModal}
+                className="rounded-xl bg-emerald-600 px-4 py-3 text-center text-sm font-bold text-white hover:bg-emerald-700"
+              >
+                Record Supplier Payment
+              </button>
+            )}
+            {!isCancelled && (
+              <button
+                type="button"
+                onClick={handleGenerateBarcodes}
+                disabled={isGeneratingLabels}
+                className="rounded-xl bg-blue-600 px-4 py-3 text-center text-sm font-bold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500 disabled:hover:bg-slate-200"
+              >
+                {isGeneratingLabels ? "Generating..." : "Generate Barcodes"}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setShowLabelPreview(true)}
+              disabled={!hasLabelRows}
+              className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-center text-sm font-bold text-blue-700 hover:bg-blue-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400 disabled:hover:bg-slate-100"
+            >
+              Preview Labels
+            </button>
+            {!isCancelled && (
+              <button
+                type="button"
+                onClick={handlePrintLabels}
+                disabled={!hasLabelRows || isPrintingLabels}
+                title={
+                  hasLabelRows
+                    ? "Open barcode label PDF"
+                    : "Generate barcodes first to preview labels."
+                }
+                className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-center text-sm font-bold text-emerald-700 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400 disabled:hover:bg-slate-100"
+              >
+                {isPrintingLabels ? "Preparing PDF..." : "Print / Download PDF"}
+              </button>
+            )}
             {isActive && (
               <button
                 type="button"
-                onClick={() => setIsCancelModalOpen(true)}
-                className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-center text-sm font-bold text-rose-700 hover:bg-rose-100"
+                onClick={() => {
+                  if (hasPaidAmount) return;
+                  setIsCancelModalOpen(true);
+                }}
+                disabled={hasPaidAmount}
+                title={
+                  hasPaidAmount
+                    ? "Cannot cancel a purchase after payment is recorded."
+                    : "Cancel purchase"
+                }
+                className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-center text-sm font-bold text-rose-700 hover:bg-rose-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400 disabled:hover:bg-slate-100"
               >
                 Cancel Purchase
               </button>
@@ -933,6 +1698,18 @@ export function PurchaseDetail() {
             </Link>
           </div>
         </div>
+
+        {labelError && (
+          <div className="mt-5 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-semibold text-rose-700">
+            {labelError}
+          </div>
+        )}
+
+        {paymentToast && (
+          <div className="mt-5 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-700">
+            {paymentToast}
+          </div>
+        )}
 
         <div className="mt-6 grid grid-cols-1 gap-3 md:grid-cols-5">
           <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
@@ -971,7 +1748,13 @@ export function PurchaseDetail() {
             <div className="text-xs font-bold uppercase tracking-[0.14em] text-slate-500">
               Due
             </div>
-            <div className="mt-1 font-black text-slate-900">
+            <div
+              className={`mt-1 font-black ${
+                numberOrZero(purchase.dueAmount) > 0
+                  ? "text-rose-700"
+                  : "text-slate-900"
+              }`}
+            >
               {money(purchase.dueAmount)}
             </div>
           </div>
@@ -1057,6 +1840,95 @@ export function PurchaseDetail() {
           </table>
         </div>
 
+        {showLabelPreview && hasLabelRows && (
+          <div className="mt-6 rounded-xl border border-slate-200">
+            <div className="flex flex-col gap-2 border-b border-slate-200 bg-white p-4 md:flex-row md:items-center md:justify-between">
+              <div>
+                <h3 className="text-lg font-black text-slate-900">
+                  Barcode Label Preview
+                </h3>
+                <p className="mt-1 text-sm font-semibold text-slate-500">
+                  {labelData?.supplierName || purchase.supplierName || "-"}{" "}
+                  {labelData?.supplierCode ? `(${labelData.supplierCode})` : ""}
+                </p>
+              </div>
+              <div className="text-sm font-bold text-slate-600">
+                Total labels:{" "}
+                <span className="text-slate-900">
+                  {labelRows.reduce(
+                    (sum, item) => sum + labelCountValue(item.labelsToPrint),
+                    0,
+                  )}
+                </span>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[900px] text-left">
+                <thead className="bg-slate-100">
+                  <tr>
+                    <th className="p-4 text-sm font-bold text-slate-600">
+                      Product
+                    </th>
+                    <th className="p-4 text-sm font-bold text-slate-600">
+                      Barcode
+                    </th>
+                    <th className="p-4 text-right text-sm font-bold text-slate-600">
+                      Qty Received
+                    </th>
+                    <th className="p-4 text-right text-sm font-bold text-slate-600">
+                      Labels To Print
+                    </th>
+                    <th className="p-4 text-right text-sm font-bold text-slate-600">
+                      Selling Price
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {labelRows.map((item) => (
+                    <tr key={item.rowKey} className="border-t border-slate-100">
+                      <td className="p-4 text-slate-800">
+                        <div className="font-semibold">
+                          {item.productName || item.productId || "-"}
+                        </div>
+                        {item.category && (
+                          <div className="mt-1 text-xs font-bold uppercase tracking-[0.12em] text-slate-400">
+                            {item.category}
+                          </div>
+                        )}
+                      </td>
+                      <td className="p-4 font-mono text-sm font-bold text-slate-800">
+                        {item.barcode || "-"}
+                      </td>
+                      <td className="p-4 text-right text-slate-700">
+                        {item.quantityReceived ?? "-"}
+                      </td>
+                      <td className="p-4 text-right">
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          className="ml-auto w-28 rounded-xl border-2 border-slate-200 p-2 text-right font-semibold text-slate-800 outline-none focus:border-blue-500"
+                          value={item.labelsToPrint}
+                          onChange={(event) =>
+                            handleLabelCountChange(
+                              item.rowKey,
+                              event.target.value,
+                            )
+                          }
+                        />
+                      </td>
+                      <td className="p-4 text-right text-slate-700">
+                        {money(item.sellingPrice)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
         {purchase.payments?.length > 0 && (
           <div className="mt-6 overflow-x-auto rounded-xl border border-slate-200">
             <table className="w-full min-w-[680px] text-left">
@@ -1098,6 +1970,100 @@ export function PurchaseDetail() {
           </div>
         )}
       </section>
+
+      {isPaymentModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">
+          <div className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-6 shadow-xl">
+            <div className="text-sm font-semibold uppercase tracking-[0.18em] text-emerald-600">
+              Supplier Payment
+            </div>
+            <h3 className="mt-2 text-2xl font-black text-slate-900">
+              Record Supplier Payment
+            </h3>
+            <p className="mt-2 text-sm font-semibold text-slate-500">
+              Current due: {money(purchase.dueAmount)}
+            </p>
+
+            {paymentError && (
+              <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-semibold text-rose-700">
+                {paymentError}
+              </div>
+            )}
+
+            <form onSubmit={handleRecordPayment} className="mt-5 space-y-5">
+              <div>
+                <label className="mb-2 block text-sm font-bold text-slate-600">
+                  Amount
+                </label>
+                <input
+                  type="number"
+                  min="0.01"
+                  max={numberOrZero(purchase.dueAmount)}
+                  step="0.01"
+                  className="w-full rounded-xl border-2 border-slate-200 p-3 outline-none focus:border-emerald-500"
+                  value={paymentForm.amount}
+                  onChange={(event) =>
+                    handlePaymentFormChange("amount", event.target.value)
+                  }
+                  disabled={isRecordingPayment}
+                />
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-bold text-slate-600">
+                  Payment Method
+                </label>
+                <select
+                  className="w-full rounded-xl border-2 border-slate-200 bg-white p-3 outline-none focus:border-emerald-500"
+                  value={paymentForm.method}
+                  onChange={(event) =>
+                    handlePaymentFormChange("method", event.target.value)
+                  }
+                  disabled={isRecordingPayment}
+                >
+                  {paymentMethods.map((method) => (
+                    <option key={method} value={method}>
+                      {method}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-bold text-slate-600">
+                  Reference / Transaction ID
+                </label>
+                <input
+                  type="text"
+                  className="w-full rounded-xl border-2 border-slate-200 p-3 outline-none focus:border-emerald-500"
+                  value={paymentForm.reference}
+                  onChange={(event) =>
+                    handlePaymentFormChange("reference", event.target.value)
+                  }
+                  disabled={isRecordingPayment}
+                />
+              </div>
+
+              <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+                <button
+                  type="button"
+                  onClick={closePaymentModal}
+                  className="rounded-xl border border-slate-300 px-4 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-100"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={!canRecordPayment}
+                  className="rounded-xl bg-emerald-600 px-5 py-3 text-sm font-bold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500 disabled:hover:bg-slate-200"
+                >
+                  {isRecordingPayment ? "RECORDING..." : "Record Payment"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {isCancelModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">

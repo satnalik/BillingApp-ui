@@ -171,7 +171,7 @@ export default function AddProducts() {
     const supplierId = Number(form.supplierId);
 
     if (
-      !barcode ||
+      (isEditMode && !barcode) ||
       !name ||
       (itemType !== "LOOSE" && itemType !== "PACKAGE") ||
       !Number.isFinite(supplierId) ||
@@ -187,7 +187,6 @@ export default function AddProducts() {
 
     try {
       const payload = {
-        barcode,
         name,
         itemType,
         sellingPrice,
@@ -202,7 +201,9 @@ export default function AddProducts() {
         category: category || null,
       };
 
-      await api.post("/products/barcode", payload);
+      if (barcode) payload.barcode = barcode;
+
+      await api.post(isEditMode ? "/products/barcode" : "/products", payload);
       await loadProducts();
       setSuccessMessage(isEditMode ? "Product updated successfully." : "Product added successfully.");
       setIsModalOpen(false);
@@ -396,18 +397,19 @@ export default function AddProducts() {
             <form onSubmit={handleSubmit} className="mt-6 space-y-6">
               <div>
                 <label className="mb-2 block text-sm font-bold text-slate-600">
-                  Barcode
+                  Barcode / Scan Barcode
                 </label>
                 <input
                   type="text"
-                  placeholder="Scan/enter barcode"
+                  placeholder="Optional manufacturer barcode"
                   className="w-full rounded-xl border-2 border-slate-200 p-3 outline-none focus:border-blue-500"
                   value={form.barcode}
                   onChange={(e) => handleChange("barcode", e.target.value)}
                   disabled={isEditMode}
                 />
                 <p className="mt-2 text-xs text-slate-400">
-                  Tip: Click and scan with a USB scanner.
+                  Optional for normal product creation. Purchase barcode labels
+                  are generated after saving a purchase bill.
                 </p>
               </div>
 
@@ -566,7 +568,7 @@ export default function AddProducts() {
                   type="submit"
                   disabled={
                     isSaving ||
-                    !form.barcode.trim() ||
+                    (isEditMode && !form.barcode.trim()) ||
                     !form.name.trim() ||
                     !form.itemType ||
                     !Number.isFinite(Number(form.supplierId)) ||
